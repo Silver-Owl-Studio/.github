@@ -1,0 +1,37 @@
+# Org-wide secret scan, required on every repo's default branch by the org ruleset
+# "Secret scan on every pull request". Scans only the pull request's own commits, so old
+# history never blocks a merge; each repo's .gitleaksignore still applies.
+name: Secret scan
+on:
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  gitleaks:
+    name: Gitleaks (pull request commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Download and verify Gitleaks 8.30.0
+        env:
+          GITLEAKS_SHA256: 79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+          GITLEAKS_VERSION: 8.30.0
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          target="${RUNNER_TEMP}/${archive}"
+          curl --fail --location --silent --show-error \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}" \
+            --output "${target}"
+          printf '%s  %s\n' "${GITLEAKS_SHA256}" "${target}" | sha256sum --check --strict
+          tar -xzf "${target}" -C "${RUNNER_TEMP}" gitleaks
+      - name: Scan this pull request's commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner --log-opts="${BASE_SHA}..${HEAD_SHA}" .
