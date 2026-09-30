@@ -10,13 +10,31 @@ permissions:
 jobs:
   gitleaks:
     name: Gitleaks (pull request commits)
-    runs-on: ubuntu-latest
+    # Private same-repo PRs and merge groups use Default group 1's e16 runner.
+    # Fork PRs and public repositories stay on GitHub-hosted runners; this job
+    # scans commit data and never executes the checked-out repository's code.
+    runs-on: >-
+      ${{ fromJSON(
+        (
+          github.event.repository.private == true &&
+          (
+            github.event_name == 'merge_group' ||
+            (
+              github.event_name == 'pull_request' &&
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          )
+        )
+        && '["self-hosted","Linux","X64","e16"]'
+        || '["ubuntu-latest"]'
+      ) }}
     timeout-minutes: 10
     steps:
       - name: Check out history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Download and verify Gitleaks 8.30.0
         env:
           GITLEAKS_SHA256: 79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
