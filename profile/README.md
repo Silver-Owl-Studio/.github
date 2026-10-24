@@ -1,6 +1,6 @@
 # Silver Owl Studios
 
-**Custom AI Models, Automation services. We design AI agents, workflows and integrations around how each business works, and run them on our own platform.
+Custom AI Models, Automation services. We design AI agents, workflows and integrations around how each business works, and run them on our own platform.
 
 ## What we build
 
