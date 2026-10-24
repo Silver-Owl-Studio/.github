@@ -6,7 +6,7 @@ Custom AI Models, Automation services. We design AI agents, workflows and integr
 
 | | |
 |---|---|
-| **Custom AI services** | AI agents, automations and integrations built around each client's workflows |
+| **Custom AI services** | Cusomer ML models, AI agents, automations and integrations built around each client's workflows |
 | **Silver Owl app** | One business suite with modules picked by need: CRM, content, insights and more · [app.silverowl.dev](https://app.silverowl.dev) |
 | **Owly** | AI companion for desktop and mobile, powered by the Owly Harness model layer *(in development)* |
 | **Phoenix** | AI chat workspace *(in development)* |
