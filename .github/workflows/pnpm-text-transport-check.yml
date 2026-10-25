@@ -1,0 +1,577 @@
+name: pnpm-text-transport-check
+'on':
+  pull_request:
+    paths:
+      - .github/workflows/pnpm-text-transport-check.yml
+permissions: {}
+jobs:
+  produce_before:
+    name: produce_before
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    outputs:
+      chunk_00: ${{ steps.emit.outputs.chunk_00 }}
+      chunk_01: ${{ steps.emit.outputs.chunk_01 }}
+      chunk_02: ${{ steps.emit.outputs.chunk_02 }}
+      chunk_03: ${{ steps.emit.outputs.chunk_03 }}
+      chunk_04: ${{ steps.emit.outputs.chunk_04 }}
+      chunk_05: ${{ steps.emit.outputs.chunk_05 }}
+      chunk_06: ${{ steps.emit.outputs.chunk_06 }}
+      chunk_07: ${{ steps.emit.outputs.chunk_07 }}
+      chunk_08: ${{ steps.emit.outputs.chunk_08 }}
+      chunk_09: ${{ steps.emit.outputs.chunk_09 }}
+      chunk_10: ${{ steps.emit.outputs.chunk_10 }}
+      chunk_11: ${{ steps.emit.outputs.chunk_11 }}
+      chunk_12: ${{ steps.emit.outputs.chunk_12 }}
+      chunk_13: ${{ steps.emit.outputs.chunk_13 }}
+      chunk_14: ${{ steps.emit.outputs.chunk_14 }}
+      chunk_15: ${{ steps.emit.outputs.chunk_15 }}
+      chunk_16: ${{ steps.emit.outputs.chunk_16 }}
+      chunk_17: ${{ steps.emit.outputs.chunk_17 }}
+      chunk_18: ${{ steps.emit.outputs.chunk_18 }}
+      chunk_19: ${{ steps.emit.outputs.chunk_19 }}
+      chunk_20: ${{ steps.emit.outputs.chunk_20 }}
+      chunk_21: ${{ steps.emit.outputs.chunk_21 }}
+      chunk_22: ${{ steps.emit.outputs.chunk_22 }}
+      chunk_23: ${{ steps.emit.outputs.chunk_23 }}
+      chunk_24: ${{ steps.emit.outputs.chunk_24 }}
+      chunk_25: ${{ steps.emit.outputs.chunk_25 }}
+      chunk_26: ${{ steps.emit.outputs.chunk_26 }}
+      chunk_27: ${{ steps.emit.outputs.chunk_27 }}
+      chunk_28: ${{ steps.emit.outputs.chunk_28 }}
+      chunk_29: ${{ steps.emit.outputs.chunk_29 }}
+      chunk_30: ${{ steps.emit.outputs.chunk_30 }}
+      chunk_31: ${{ steps.emit.outputs.chunk_31 }}
+      count: ${{ steps.emit.outputs.count }}
+      length: ${{ steps.emit.outputs.length }}
+      sha256: ${{ steps.emit.outputs.sha256 }}
+      side: ${{ steps.emit.outputs.side }}
+    steps:
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+          token: ''
+          check-latest: false
+          allow-prereleases: false
+      - name: Emit synthetic packet (before)
+        id: emit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import hashlib, json, os, platform, sys
+          SIDE = 'before'
+          CHUNK = 16384
+          SLOTS = 32
+          TARGET = 440000
+          MAX_COUNT = 27
+          CAP = 900000
+          OVERHEAD = 4096
+          KEYS = ['chunk_%02d' % i for i in range(SLOTS)]
+          def D(o):
+              return json.dumps(o, separators=(',', ':'), ensure_ascii=True)
+          def gen(side):
+              text = 'q' + chr(34) + 'b' + chr(92) + 'n' + chr(10) + '$(id) `id`;|&<>' + chr(39) + chr(92) + chr(92)
+              uni = 'caf' + chr(0xe9) + chr(0x2603)
+              size = len(D({'side': side, 'schema': 1, 'items': [], 'pad': ''}))
+              items = []
+              while True:
+                  n = len(items)
+                  rec = {'i': n, 's': side, 'k': hashlib.sha256(('%s:%d' % (side, n)).encode('ascii')).hexdigest(), 't': text, 'u': uni}
+                  add = len(D(rec)) + (1 if items else 0)
+                  if size + add > TARGET - 2000:
+                      break
+                  items.append(rec)
+                  size += add
+              padlen = TARGET - size
+              pad = ''
+              k = 0
+              while len(pad) < padlen:
+                  pad += hashlib.sha256(('%s:pad:%d' % (side, k)).encode('ascii')).hexdigest()
+                  k += 1
+              doc = D({'side': side, 'schema': 1, 'items': items, 'pad': pad[:padlen]})
+              if len(doc) != TARGET or not doc.isascii():
+                  sys.exit('generator length')
+              return doc
+          doc = gen(SIDE)
+          parts = [doc[i:i + CHUNK] for i in range(0, len(doc), CHUNK)]
+          count = len(parts)
+          if count != -(-len(doc) // CHUNK) or count > MAX_COUNT or count > SLOTS:
+              sys.exit('layout')
+          if any(len(p) != CHUNK for p in parts[:-1]) or not 0 < len(parts[-1]) <= CHUNK:
+              sys.exit('layout chunks')
+          out = {k: '' for k in KEYS}
+          for k, p in zip(KEYS, parts):
+              out[k] = p
+          out['count'] = str(count)
+          out['length'] = str(len(doc))
+          out['sha256'] = hashlib.sha256(doc.encode('ascii')).hexdigest()
+          out['side'] = SIDE
+          bad = {chr(10), chr(13), chr(0)}
+          for k, v in out.items():
+              if not v.isascii() or (set(v) & bad):
+                  sys.exit('charset')
+          est = sum(2 * (len(k) + len(v) + 2) for k, v in out.items()) + OVERHEAD
+          if est >= CAP:
+              sys.exit('cap exceeded')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii', newline='') as f:
+              for k, v in out.items():
+                  f.write(k + '=' + v + chr(10))
+          print('PRODUCED side=%s count=%d length=%d sha256=%s utf16_est=%d' % (SIDE, count, len(doc), out['sha256'], est))
+          print('RUNTIME py=%s exe=%s os=%s %s' % (platform.python_version(), sys.executable, platform.system(), platform.machine()))
+          PY
+  produce_after:
+    name: produce_after
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    outputs:
+      chunk_00: ${{ steps.emit.outputs.chunk_00 }}
+      chunk_01: ${{ steps.emit.outputs.chunk_01 }}
+      chunk_02: ${{ steps.emit.outputs.chunk_02 }}
+      chunk_03: ${{ steps.emit.outputs.chunk_03 }}
+      chunk_04: ${{ steps.emit.outputs.chunk_04 }}
+      chunk_05: ${{ steps.emit.outputs.chunk_05 }}
+      chunk_06: ${{ steps.emit.outputs.chunk_06 }}
+      chunk_07: ${{ steps.emit.outputs.chunk_07 }}
+      chunk_08: ${{ steps.emit.outputs.chunk_08 }}
+      chunk_09: ${{ steps.emit.outputs.chunk_09 }}
+      chunk_10: ${{ steps.emit.outputs.chunk_10 }}
+      chunk_11: ${{ steps.emit.outputs.chunk_11 }}
+      chunk_12: ${{ steps.emit.outputs.chunk_12 }}
+      chunk_13: ${{ steps.emit.outputs.chunk_13 }}
+      chunk_14: ${{ steps.emit.outputs.chunk_14 }}
+      chunk_15: ${{ steps.emit.outputs.chunk_15 }}
+      chunk_16: ${{ steps.emit.outputs.chunk_16 }}
+      chunk_17: ${{ steps.emit.outputs.chunk_17 }}
+      chunk_18: ${{ steps.emit.outputs.chunk_18 }}
+      chunk_19: ${{ steps.emit.outputs.chunk_19 }}
+      chunk_20: ${{ steps.emit.outputs.chunk_20 }}
+      chunk_21: ${{ steps.emit.outputs.chunk_21 }}
+      chunk_22: ${{ steps.emit.outputs.chunk_22 }}
+      chunk_23: ${{ steps.emit.outputs.chunk_23 }}
+      chunk_24: ${{ steps.emit.outputs.chunk_24 }}
+      chunk_25: ${{ steps.emit.outputs.chunk_25 }}
+      chunk_26: ${{ steps.emit.outputs.chunk_26 }}
+      chunk_27: ${{ steps.emit.outputs.chunk_27 }}
+      chunk_28: ${{ steps.emit.outputs.chunk_28 }}
+      chunk_29: ${{ steps.emit.outputs.chunk_29 }}
+      chunk_30: ${{ steps.emit.outputs.chunk_30 }}
+      chunk_31: ${{ steps.emit.outputs.chunk_31 }}
+      count: ${{ steps.emit.outputs.count }}
+      length: ${{ steps.emit.outputs.length }}
+      sha256: ${{ steps.emit.outputs.sha256 }}
+      side: ${{ steps.emit.outputs.side }}
+    steps:
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+          token: ''
+          check-latest: false
+          allow-prereleases: false
+      - name: Emit synthetic packet (after)
+        id: emit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import hashlib, json, os, platform, sys
+          SIDE = 'after'
+          CHUNK = 16384
+          SLOTS = 32
+          TARGET = 440000
+          MAX_COUNT = 27
+          CAP = 900000
+          OVERHEAD = 4096
+          KEYS = ['chunk_%02d' % i for i in range(SLOTS)]
+          def D(o):
+              return json.dumps(o, separators=(',', ':'), ensure_ascii=True)
+          def gen(side):
+              text = 'q' + chr(34) + 'b' + chr(92) + 'n' + chr(10) + '$(id) `id`;|&<>' + chr(39) + chr(92) + chr(92)
+              uni = 'caf' + chr(0xe9) + chr(0x2603)
+              size = len(D({'side': side, 'schema': 1, 'items': [], 'pad': ''}))
+              items = []
+              while True:
+                  n = len(items)
+                  rec = {'i': n, 's': side, 'k': hashlib.sha256(('%s:%d' % (side, n)).encode('ascii')).hexdigest(), 't': text, 'u': uni}
+                  add = len(D(rec)) + (1 if items else 0)
+                  if size + add > TARGET - 2000:
+                      break
+                  items.append(rec)
+                  size += add
+              padlen = TARGET - size
+              pad = ''
+              k = 0
+              while len(pad) < padlen:
+                  pad += hashlib.sha256(('%s:pad:%d' % (side, k)).encode('ascii')).hexdigest()
+                  k += 1
+              doc = D({'side': side, 'schema': 1, 'items': items, 'pad': pad[:padlen]})
+              if len(doc) != TARGET or not doc.isascii():
+                  sys.exit('generator length')
+              return doc
+          doc = gen(SIDE)
+          parts = [doc[i:i + CHUNK] for i in range(0, len(doc), CHUNK)]
+          count = len(parts)
+          if count != -(-len(doc) // CHUNK) or count > MAX_COUNT or count > SLOTS:
+              sys.exit('layout')
+          if any(len(p) != CHUNK for p in parts[:-1]) or not 0 < len(parts[-1]) <= CHUNK:
+              sys.exit('layout chunks')
+          out = {k: '' for k in KEYS}
+          for k, p in zip(KEYS, parts):
+              out[k] = p
+          out['count'] = str(count)
+          out['length'] = str(len(doc))
+          out['sha256'] = hashlib.sha256(doc.encode('ascii')).hexdigest()
+          out['side'] = SIDE
+          bad = {chr(10), chr(13), chr(0)}
+          for k, v in out.items():
+              if not v.isascii() or (set(v) & bad):
+                  sys.exit('charset')
+          est = sum(2 * (len(k) + len(v) + 2) for k, v in out.items()) + OVERHEAD
+          if est >= CAP:
+              sys.exit('cap exceeded')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii', newline='') as f:
+              for k, v in out.items():
+                  f.write(k + '=' + v + chr(10))
+          print('PRODUCED side=%s count=%d length=%d sha256=%s utf16_est=%d' % (SIDE, count, len(doc), out['sha256'], est))
+          print('RUNTIME py=%s exe=%s os=%s %s' % (platform.python_version(), sys.executable, platform.system(), platform.machine()))
+          PY
+  consume:
+    name: consume
+    needs: [produce_before, produce_after]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Guard upstream results
+        shell: bash
+        env:
+          BEFORE_RESULT: ${{ needs.produce_before.result }}
+          AFTER_RESULT: ${{ needs.produce_after.result }}
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE_RESULT" != success ] || [ "$AFTER_RESULT" != success ]; then
+            echo 'HOLD: a producer job did not succeed'
+            exit 1
+          fi
+          echo 'GUARD-PASS both producers succeeded'
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+          token: ''
+          check-latest: false
+          allow-prereleases: false
+      - name: Create trusted helper in fresh temp dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d "$RUNNER_TEMP/ttc.XXXXXX")"
+          chmod 700 "$d"
+          echo "TTC_DIR=$d" >> "$GITHUB_ENV"
+          cat > "$d/helper.py" <<'PY'
+          import hashlib, json, os, platform, re, sys
+          CHUNK = 16384
+          SLOTS = 32
+          TARGET = 440000
+          MAX_COUNT = 27
+          CAP = 900000
+          OVERHEAD = 4096
+          KEYS = ['chunk_%02d' % i for i in range(SLOTS)]
+          META = ('count', 'length', 'sha256', 'side')
+          SIDES = ('before', 'after')
+          BAD = {chr(10), chr(13), chr(0)}
+          class Hold(Exception):
+              def __init__(self, reason):
+                  super().__init__(reason)
+                  self.reason = reason
+          def D(o):
+              return json.dumps(o, separators=(',', ':'), ensure_ascii=True)
+          def sha(s):
+              return hashlib.sha256(s.encode('ascii')).hexdigest()
+          def gen(side):
+              text = 'q' + chr(34) + 'b' + chr(92) + 'n' + chr(10) + '$(id) `id`;|&<>' + chr(39) + chr(92) + chr(92)
+              uni = 'caf' + chr(0xe9) + chr(0x2603)
+              size = len(D({'side': side, 'schema': 1, 'items': [], 'pad': ''}))
+              items = []
+              while True:
+                  n = len(items)
+                  rec = {'i': n, 's': side, 'k': sha('%s:%d' % (side, n)), 't': text, 'u': uni}
+                  add = len(D(rec)) + (1 if items else 0)
+                  if size + add > TARGET - 2000:
+                      break
+                  items.append(rec)
+                  size += add
+              padlen = TARGET - size
+              pad = ''
+              k = 0
+              while len(pad) < padlen:
+                  pad += sha('%s:pad:%d' % (side, k))
+                  k += 1
+              doc = D({'side': side, 'schema': 1, 'items': items, 'pad': pad[:padlen]})
+              if len(doc) != TARGET or not doc.isascii():
+                  raise AssertionError('generator length')
+              return doc
+          def utf16_total(m):
+              return sum(2 * (len(k) + len(v) + 2) for k, v in m.items()) + OVERHEAD
+          def ident():
+              return 'py=%s exe=%s os=%s %s' % (platform.python_version(), sys.executable, platform.system(), platform.machine())
+          def validate(m, expected):
+              if expected not in SIDES:
+                  raise Hold('expected_side')
+              if set(m) != set(KEYS) | set(META) or any(not isinstance(v, str) for v in m.values()):
+                  raise Hold('schema')
+              for v in m.values():
+                  if not v.isascii() or (set(v) & BAD):
+                      raise Hold('charset')
+              if m['side'] != expected:
+                  raise Hold('side')
+              for s in (m['count'], m['length']):
+                  if not (s.isdigit() and str(int(s)) == s):
+                      raise Hold('meta_format')
+              digest = m['sha256']
+              if not re.fullmatch('[0-9a-f]{64}', digest):
+                  raise Hold('meta_format')
+              count = int(m['count'])
+              length = int(m['length'])
+              if length > TARGET or count > MAX_COUNT:
+                  raise Hold('oversize_total')
+              if count < 1 or count != -(-length // CHUNK):
+                  raise Hold('count_mismatch')
+              if length != TARGET:
+                  raise Hold('length_mismatch')
+              chunks = [m[k] for k in KEYS]
+              for i in range(count):
+                  c = chunks[i]
+                  if len(c) > CHUNK:
+                      raise Hold('chunk_over_limit')
+                  if i < count - 1:
+                      if len(c) != CHUNK:
+                          raise Hold('chunk_not_full')
+                  elif len(c) != length - (count - 1) * CHUNK:
+                      raise Hold('final_chunk_len')
+              if any(chunks[count:]):
+                  raise Hold('trailing_nonempty')
+              est = utf16_total(m)
+              if est >= CAP:
+                  raise Hold('cap')
+              joined = ''.join(chunks[:count])
+              if len(joined) != length:
+                  raise Hold('joined_length')
+              if sha(joined) != digest:
+                  raise Hold('digest_mismatch')
+              if joined != gen(expected):
+                  raise Hold('content_mismatch')
+              try:
+                  obj = json.loads(joined)
+              except ValueError:
+                  raise Hold('json_invalid')
+              if not isinstance(obj, dict) or set(obj) != {'side', 'schema', 'items', 'pad'}:
+                  raise Hold('json_schema')
+              if obj['side'] != expected or obj['schema'] != 1 or not isinstance(obj['items'], list) or not obj['items']:
+                  raise Hold('json_schema')
+              if D(obj) != joined:
+                  raise Hold('not_canonical')
+              return {'side': expected, 'count': count, 'length': length, 'sha256': digest, 'items': len(obj['items']), 'utf16_est': est}
+          def controls(valid, expected):
+              cases = []
+              def add(name, reason, fn):
+                  m = dict(valid)
+                  fn(m)
+                  cases.append((name, reason, m))
+              def missing(m):
+                  m['chunk_05'] = ''
+              def changed(m):
+                  c = m['chunk_03']
+                  m['chunk_03'] = ('x' if c[0] != 'x' else 'y') + c[1:]
+              def changed_forged(m):
+                  changed(m)
+                  m['sha256'] = sha(''.join(m[k] for k in KEYS))
+              def swapped(m):
+                  if m['chunk_02'] == m['chunk_07']:
+                      raise AssertionError('vacuous swap')
+                  m['chunk_02'], m['chunk_07'] = m['chunk_07'], m['chunk_02']
+              def trailing(m):
+                  m['chunk_30'] = 'A'
+              def forged_length(m):
+                  m['length'] = '439999'
+              def forged_count(m):
+                  m['count'] = '26'
+              def forged_digest(m):
+                  m['sha256'] = '0' * 64
+              def over(m):
+                  m['chunk_00'] = m['chunk_00'] + 'A'
+              def oversize(m):
+                  for k in KEYS[:29]:
+                      m[k] = 'B' * CHUNK
+                  m['count'] = '29'
+                  m['length'] = str(29 * CHUNK)
+                  m['sha256'] = sha('B' * CHUNK * 29)
+              add('missing_nonempty_chunk', 'chunk_not_full', missing)
+              add('changed_chunk_content', 'digest_mismatch', changed)
+              add('changed_content_forged_digest', 'content_mismatch', changed_forged)
+              add('swapped_chunks', 'digest_mismatch', swapped)
+              add('unexpected_trailing_chunk', 'trailing_nonempty', trailing)
+              add('forged_length', 'length_mismatch', forged_length)
+              add('forged_count', 'count_mismatch', forged_count)
+              add('forged_digest', 'digest_mismatch', forged_digest)
+              add('chunk_over_16384', 'chunk_over_limit', over)
+              add('oversize_total_payload', 'oversize_total', oversize)
+              for name, reason, m in cases:
+                  try:
+                      validate(m, expected)
+                  except Hold as h:
+                      if h.reason != reason:
+                          raise AssertionError('control wrong reason: ' + name)
+                  else:
+                      raise AssertionError('control did not hold: ' + name)
+              return len(cases)
+          def env_map():
+              m = {}
+              for k in KEYS:
+                  m[k] = os.environ.get(k.upper())
+              for k in META:
+                  m[k] = os.environ.get('META_' + k.upper())
+              return m
+          def cmd_check(d):
+              expected = os.environ.get('EXPECTED_SIDE', '')
+              m = env_map()
+              r = validate(m, expected)
+              n = controls(m, expected)
+              r['controls'] = n
+              r['ident'] = ident()
+              with open(os.path.join(d, 'result_' + expected + '.json'), 'x', encoding='ascii') as f:
+                  f.write(D(r))
+              print('CHECK-PASS side=%s count=%d length=%d sha256=%s items=%d utf16_est=%d' % (r['side'], r['count'], r['length'], r['sha256'], r['items'], r['utf16_est']))
+              print('NEGATIVE-CONTROLS-PASS side=%s cases=%d' % (expected, n))
+              print('RUNTIME ' + ident())
+          def cmd_final(d):
+              res = {}
+              for s in SIDES:
+                  p = os.path.join(d, 'result_' + s + '.json')
+                  if os.path.islink(p) or not os.path.isfile(p) or os.path.dirname(os.path.realpath(p)) != os.path.realpath(d):
+                      raise Hold('result_file')
+                  with open(p, encoding='ascii') as f:
+                      r = json.load(f)
+                  if r.get('side') != s or r.get('count') != 27 or r.get('length') != TARGET or r.get('controls') != 10:
+                      raise Hold('result_content')
+                  res[s] = r
+              if res['before']['sha256'] == res['after']['sha256']:
+                  raise Hold('not_distinct')
+              print('TEXT-TRANSPORT-CHECK-COMPLETE before=%s after=%s' % (res['before']['sha256'][:16], res['after']['sha256'][:16]))
+              print('RUNTIME ' + ident())
+          def main():
+              mode = sys.argv[1]
+              d = sys.argv[2]
+              try:
+                  if not os.path.isabs(d) or not os.path.isdir(d):
+                      raise Hold('dir')
+                  {'check': cmd_check, 'final': cmd_final}[mode](d)
+              except Hold as h:
+                  print('HOLD reason=' + h.reason)
+                  sys.exit(1)
+              except Exception as e:
+                  print('ERROR type=' + type(e).__name__)
+                  sys.exit(1)
+          if __name__ == '__main__':
+              main()
+          PY
+          echo 'HELPER-CREATED'
+      - name: Check producer before
+        shell: bash
+        env:
+          EXPECTED_SIDE: before
+          CHUNK_00: ${{ needs.produce_before.outputs.chunk_00 }}
+          CHUNK_01: ${{ needs.produce_before.outputs.chunk_01 }}
+          CHUNK_02: ${{ needs.produce_before.outputs.chunk_02 }}
+          CHUNK_03: ${{ needs.produce_before.outputs.chunk_03 }}
+          CHUNK_04: ${{ needs.produce_before.outputs.chunk_04 }}
+          CHUNK_05: ${{ needs.produce_before.outputs.chunk_05 }}
+          CHUNK_06: ${{ needs.produce_before.outputs.chunk_06 }}
+          CHUNK_07: ${{ needs.produce_before.outputs.chunk_07 }}
+          CHUNK_08: ${{ needs.produce_before.outputs.chunk_08 }}
+          CHUNK_09: ${{ needs.produce_before.outputs.chunk_09 }}
+          CHUNK_10: ${{ needs.produce_before.outputs.chunk_10 }}
+          CHUNK_11: ${{ needs.produce_before.outputs.chunk_11 }}
+          CHUNK_12: ${{ needs.produce_before.outputs.chunk_12 }}
+          CHUNK_13: ${{ needs.produce_before.outputs.chunk_13 }}
+          CHUNK_14: ${{ needs.produce_before.outputs.chunk_14 }}
+          CHUNK_15: ${{ needs.produce_before.outputs.chunk_15 }}
+          CHUNK_16: ${{ needs.produce_before.outputs.chunk_16 }}
+          CHUNK_17: ${{ needs.produce_before.outputs.chunk_17 }}
+          CHUNK_18: ${{ needs.produce_before.outputs.chunk_18 }}
+          CHUNK_19: ${{ needs.produce_before.outputs.chunk_19 }}
+          CHUNK_20: ${{ needs.produce_before.outputs.chunk_20 }}
+          CHUNK_21: ${{ needs.produce_before.outputs.chunk_21 }}
+          CHUNK_22: ${{ needs.produce_before.outputs.chunk_22 }}
+          CHUNK_23: ${{ needs.produce_before.outputs.chunk_23 }}
+          CHUNK_24: ${{ needs.produce_before.outputs.chunk_24 }}
+          CHUNK_25: ${{ needs.produce_before.outputs.chunk_25 }}
+          CHUNK_26: ${{ needs.produce_before.outputs.chunk_26 }}
+          CHUNK_27: ${{ needs.produce_before.outputs.chunk_27 }}
+          CHUNK_28: ${{ needs.produce_before.outputs.chunk_28 }}
+          CHUNK_29: ${{ needs.produce_before.outputs.chunk_29 }}
+          CHUNK_30: ${{ needs.produce_before.outputs.chunk_30 }}
+          CHUNK_31: ${{ needs.produce_before.outputs.chunk_31 }}
+          META_COUNT: ${{ needs.produce_before.outputs.count }}
+          META_LENGTH: ${{ needs.produce_before.outputs.length }}
+          META_SHA256: ${{ needs.produce_before.outputs.sha256 }}
+          META_SIDE: ${{ needs.produce_before.outputs.side }}
+        run: |
+          set -euo pipefail
+          python3 -I "$TTC_DIR/helper.py" check "$TTC_DIR"
+      - name: Check producer after
+        shell: bash
+        env:
+          EXPECTED_SIDE: after
+          CHUNK_00: ${{ needs.produce_after.outputs.chunk_00 }}
+          CHUNK_01: ${{ needs.produce_after.outputs.chunk_01 }}
+          CHUNK_02: ${{ needs.produce_after.outputs.chunk_02 }}
+          CHUNK_03: ${{ needs.produce_after.outputs.chunk_03 }}
+          CHUNK_04: ${{ needs.produce_after.outputs.chunk_04 }}
+          CHUNK_05: ${{ needs.produce_after.outputs.chunk_05 }}
+          CHUNK_06: ${{ needs.produce_after.outputs.chunk_06 }}
+          CHUNK_07: ${{ needs.produce_after.outputs.chunk_07 }}
+          CHUNK_08: ${{ needs.produce_after.outputs.chunk_08 }}
+          CHUNK_09: ${{ needs.produce_after.outputs.chunk_09 }}
+          CHUNK_10: ${{ needs.produce_after.outputs.chunk_10 }}
+          CHUNK_11: ${{ needs.produce_after.outputs.chunk_11 }}
+          CHUNK_12: ${{ needs.produce_after.outputs.chunk_12 }}
+          CHUNK_13: ${{ needs.produce_after.outputs.chunk_13 }}
+          CHUNK_14: ${{ needs.produce_after.outputs.chunk_14 }}
+          CHUNK_15: ${{ needs.produce_after.outputs.chunk_15 }}
+          CHUNK_16: ${{ needs.produce_after.outputs.chunk_16 }}
+          CHUNK_17: ${{ needs.produce_after.outputs.chunk_17 }}
+          CHUNK_18: ${{ needs.produce_after.outputs.chunk_18 }}
+          CHUNK_19: ${{ needs.produce_after.outputs.chunk_19 }}
+          CHUNK_20: ${{ needs.produce_after.outputs.chunk_20 }}
+          CHUNK_21: ${{ needs.produce_after.outputs.chunk_21 }}
+          CHUNK_22: ${{ needs.produce_after.outputs.chunk_22 }}
+          CHUNK_23: ${{ needs.produce_after.outputs.chunk_23 }}
+          CHUNK_24: ${{ needs.produce_after.outputs.chunk_24 }}
+          CHUNK_25: ${{ needs.produce_after.outputs.chunk_25 }}
+          CHUNK_26: ${{ needs.produce_after.outputs.chunk_26 }}
+          CHUNK_27: ${{ needs.produce_after.outputs.chunk_27 }}
+          CHUNK_28: ${{ needs.produce_after.outputs.chunk_28 }}
+          CHUNK_29: ${{ needs.produce_after.outputs.chunk_29 }}
+          CHUNK_30: ${{ needs.produce_after.outputs.chunk_30 }}
+          CHUNK_31: ${{ needs.produce_after.outputs.chunk_31 }}
+          META_COUNT: ${{ needs.produce_after.outputs.count }}
+          META_LENGTH: ${{ needs.produce_after.outputs.length }}
+          META_SHA256: ${{ needs.produce_after.outputs.sha256 }}
+          META_SIDE: ${{ needs.produce_after.outputs.side }}
+        run: |
+          set -euo pipefail
+          python3 -I "$TTC_DIR/helper.py" check "$TTC_DIR"
+      - name: Assert both checked results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I "$TTC_DIR/helper.py" final "$TTC_DIR"
