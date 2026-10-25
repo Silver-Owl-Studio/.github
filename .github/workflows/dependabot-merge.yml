@@ -1,0 +1,1001 @@
+# Central reusable workflow: Silver-Owl-Studio/.github/.github/workflows/dependabot-merge.yml
+# ASSEMBLY (coordinator): replace each PLACEHOLDER line below with the matching trusted source file.
+# Every inserted line must be indented by exactly 10 spaces (the run: block indent). Blank lines may be empty.
+# No source line may equal its heredoc delimiter (OWL_EOF_*). Nothing here checks out or reads private source.
+name: Dependabot merge gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      repo_id:
+        type: string
+        required: true
+      base_branch:
+        type: string
+        default: main
+      expected_checks:
+        type: string
+        required: true
+      ci_workflow_path:
+        type: string
+        default: .github/workflows/ci.yml
+      metadata_job_name:
+        type: string
+        default: dependabot-metadata
+      max_changed_nodes:
+        type: string
+        default: '20'
+      only_pr:
+        type: string
+        default: ''
+    outputs:
+      merge_sha:
+        value: ${{ jobs.gate.outputs.merge_sha }}
+      merged_pr:
+        value: ${{ jobs.gate.outputs.merged_pr }}
+
+permissions: {}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+    outputs:
+      merge_sha: ${{ steps.gate.outputs.merge_sha }}
+      merged_pr: ${{ steps.gate.outputs.merged_pr }}
+    steps:
+      - name: Install trusted gate source (no checkout, no token in this step)
+        run: |
+          set -eu
+          GATE_DIR="$RUNNER_TEMP/gate"
+          mkdir -p "$GATE_DIR"
+          cat > "$GATE_DIR/classifier.py" <<'OWL_EOF_CLASSIFIER'
+          # Conservative classifier for npm lockfileVersion 3 dependency updates (stdlib only).
+          # STATUS OK means only 'eligible for human review under policy'; it never approves a merge.
+          import base64
+          import binascii
+          import json
+
+          MAX_CHARS = 2000000
+          MAX_DEPTH = 40
+          MAX_DIGITS = 9
+          DEPS = ('dependencies', 'devDependencies', 'optionalDependencies')
+          NODE_FIELDS = frozenset(('version', 'resolved', 'integrity'))
+          DIGITS = frozenset('0123456789')
+          NAME_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789._-')
+          REGISTRY = 'https://registry.npmjs.org/'
+
+
+          class Bad(Exception):
+              pass
+
+
+          def _eq(a, b):
+              # canonical comparison: keeps 1, 1.0 and True distinct
+              return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+          def _pairs(pairs):
+              out = {}
+              for k, v in pairs:
+                  if k in out:
+                      raise Bad('duplicate JSON key')
+                  out[k] = v
+              return out
+
+
+          def _bad_const(name):
+              raise Bad('non-finite JSON number')
+
+
+          def _depth_ok(v, n=0):
+              if n > MAX_DEPTH:
+                  raise Bad('JSON too deep')
+              kids = v.values() if type(v) is dict else (v if type(v) is list else ())
+              for k in kids:
+                  _depth_ok(k, n + 1)
+
+
+          def _load(s, what):
+              if type(s) is not str:
+                  raise Bad(what + ' is not a string')
+              if len(s) > MAX_CHARS:
+                  raise Bad(what + ' too large')
+              try:
+                  v = json.loads(s, object_pairs_hook=_pairs, parse_constant=_bad_const)
+              except (ValueError, RecursionError):
+                  raise Bad(what + ' is not valid JSON')
+              if type(v) is not dict:
+                  raise Bad(what + ' is not an object')
+              _depth_ok(v)
+              return v
+
+
+          def _semver(s):
+              # stable X.Y.Z only: ASCII digits, no leading zero, bounded size
+              if type(s) is not str or not s.isascii():
+                  raise Bad('unsupported version')
+              parts = s.split('.')
+              if len(parts) != 3:
+                  raise Bad('unsupported version')
+              out = []
+              for p in parts:
+                  if not 0 < len(p) <= MAX_DIGITS or not set(p) <= DIGITS or (p[0] == '0' and len(p) > 1):
+                      raise Bad('unsupported version')
+                  out.append(int(p))
+              return tuple(out)
+
+
+          def _range(s):
+              try:
+                  if type(s) is not str:
+                      raise Bad('')
+                  op = s[0] if s[:1] in ('^', '~') else ''
+                  return (op, _semver(s[len(op):]))
+              except Bad:
+                  raise Bad('unsupported dependency range')
+
+
+          def _sat(r, v):
+              op, b = r
+              if v < b:
+                  return False
+              if op == '':
+                  return v == b
+              if op == '~':
+                  return v[:2] == b[:2]
+              if b[0]:
+                  return v[0] == b[0]
+              if b[1]:
+                  return v[:2] == b[:2]
+              return v == b
+
+
+          def _valid_name(n):
+              if type(n) is not str or not n.isascii() or not 0 < len(n) <= 214:
+                  return False
+              segs = n.split('/')
+              if n[0] == '@':
+                  if len(segs) != 2:
+                      return False
+                  segs[0] = segs[0][1:]
+              elif len(segs) != 1:
+                  return False
+              for s in segs:
+                  if not s or s[0] in '._' or s == 'node_modules' or not set(s) <= NAME_CHARS:
+                      return False
+              return True
+
+
+          def _name_of(key):
+              parts = key.split('/')
+              i = 0
+              name = None
+              while i < len(parts):
+                  if parts[i] != 'node_modules' or i + 1 >= len(parts):
+                      raise Bad('unsupported path key')
+                  i += 1
+                  if parts[i].startswith('@'):
+                      if i + 1 >= len(parts):
+                          raise Bad('unsupported path key')
+                      name = parts[i] + '/' + parts[i + 1]
+                      i += 2
+                  else:
+                      name = parts[i]
+                      i += 1
+                  if not _valid_name(name):
+                      raise Bad('unsupported package name')
+              return name
+
+
+          def _integrity(s):
+              if type(s) is not str or not s.isascii() or not s.startswith('sha512-'):
+                  raise Bad('integrity must be sha512')
+              b64 = s[7:]
+              try:
+                  raw = base64.b64decode(b64, validate=True)
+              except (binascii.Error, ValueError):
+                  raise Bad('integrity is not base64')
+              if len(raw) != 64 or base64.b64encode(raw).decode() != b64:
+                  raise Bad('integrity is not a canonical 64-byte digest')
+
+
+          def _check_node(name, n):
+              if 'link' in n or 'workspaces' in n:
+                  raise Bad('link or workspace node')
+              if 'name' in n and n['name'] != name:
+                  raise Bad('aliased package node')
+              ver = _semver(n.get('version'))
+              want = '%s%s/-/%s-%s.tgz' % (REGISTRY, name, name.split('/')[-1], n['version'])
+              if n.get('resolved') != want:
+                  raise Bad('resolved URL does not match package identity')
+              _integrity(n.get('integrity'))
+              return ver
+
+
+          def _upgrade(b, a, bv, av):
+              diff = [f for f in set(b) | set(a)
+                      if (f in b) != (f in a) or (f in b and not _eq(b[f], a[f]))]
+              extra = sorted(f for f in diff if f not in NODE_FIELDS)
+              if extra:
+                  raise Bad('disallowed field change: ' + ','.join(extra))
+              if av == bv:
+                  raise Bad('same-version source or integrity change')
+              if av < bv or av[0] != bv[0] or bv[0] == 0:
+                  raise Bad('not a same-major upgrade')
+              if _eq(b['integrity'], a['integrity']):
+                  raise Bad('version bump without integrity change')
+
+
+          def _packages(lock):
+              if type(lock.get('lockfileVersion')) is not int or lock['lockfileVersion'] != 3:
+                  raise Bad('lockfileVersion must be exactly 3')
+              pk = lock.get('packages')
+              if type(pk) is not dict or '' not in pk or any(type(v) is not dict for v in pk.values()):
+                  raise Bad('malformed packages map')
+              return pk
+
+
+          def _non_dep(m):
+              return {k: v for k, v in m.items() if k not in DEPS}
+
+
+          def _deps(m):
+              if 'workspaces' in m:
+                  raise Bad('workspaces unsupported')
+              cats = {}
+              for c in DEPS:
+                  d = m.get(c, {})
+                  if type(d) is not dict:
+                      raise Bad('malformed dependency map')
+                  for k, v in d.items():
+                      if k in cats:
+                          raise Bad('dependency in two categories')
+                      if not _valid_name(k):
+                          raise Bad('unsupported package name')
+                      cats[k] = (c, _range(v))
+              return cats
+
+
+          def _manifests(bm, am):
+              bd, ad = _deps(bm), _deps(am)
+              if not _eq(_non_dep(bm), _non_dep(am)):
+                  raise Bad('non-dependency manifest field changed')
+              if set(bd) != set(ad):
+                  raise Bad('dependency name set changed')
+              for name, (cat, r) in bd.items():
+                  cat2, r2 = ad[name]
+                  if cat != cat2:
+                      raise Bad('dependency category changed')
+                  if r != r2:
+                      if r[0] != r2[0]:
+                          raise Bad('dependency range operator changed')
+                      if r2[1] < r[1] or r2[1][0] != r[1][0] or r[1][0] == 0:
+                          raise Bad('dependency range change is not a same-major upgrade')
+              return bd, ad
+
+
+          def _root(lock, pk, m, deps):
+              root = pk['']
+              if 'workspaces' in root or 'link' in root:
+                  raise Bad('workspaces unsupported')
+              for f in ('name', 'version'):
+                  if not _eq(root.get(f), m.get(f)):
+                      raise Bad('root package disagrees with manifest')
+                  if f in lock and not _eq(lock[f], m.get(f)):
+                      raise Bad('lock name or version disagrees with manifest')
+              for c in DEPS:
+                  if not _eq(root.get(c, {}), m.get(c, {})):
+                      raise Bad('root package disagrees with manifest')
+              for name, (cat, r) in deps.items():
+                  node = pk.get('node_modules/' + name)
+                  if node is None:
+                      if cat != 'optionalDependencies':
+                          raise Bad('dependency missing from lock')
+                      continue
+                  if not _sat(r, _semver(node.get('version'))):
+                      raise Bad('locked version outside manifest range')
+
+
+          def _policy(p):
+              if type(p) is not dict or set(p) != {'max_changed_nodes'}:
+                  raise Bad('policy must be exactly {max_changed_nodes: positive int}')
+              n = p['max_changed_nodes']
+              if type(n) is not int or n < 1:
+                  raise Bad('policy must be exactly {max_changed_nodes: positive int}')
+              return n
+
+
+          def _run(bls, als, bms, ams, policy, changed):
+              cap = _policy(policy)
+              bl, al = _load(bls, 'before lock'), _load(als, 'after lock')
+              bm, am = _load(bms, 'before manifest'), _load(ams, 'after manifest')
+              bp, ap = _packages(bl), _packages(al)
+              meta = lambda d: {k: v for k, v in d.items() if k != 'packages'}
+              if not _eq(meta(bl), meta(al)):
+                  raise Bad('lock metadata changed')
+              if set(bp) != set(ap):
+                  raise Bad('package nodes added or removed')
+              changed.extend(sorted(k for k in bp if k and not _eq(bp[k], ap[k])))
+              seen = set(changed)
+              bd, ad = _manifests(bm, am)
+              _root(bl, bp, bm, bd)
+              _root(al, ap, am, ad)
+              if not _eq(_non_dep(bp['']), _non_dep(ap[''])):
+                  raise Bad('root package field changed')
+              for key in sorted(k for k in bp if k):
+                  try:
+                      name = _name_of(key)
+                      # Unchanged upstream package metadata is baseline, not a new workspace.
+                      # npm package nodes can legitimately contain a workspaces field.
+                      parent = key
+                      while '/node_modules/' in parent:
+                          parent = parent.rsplit('/node_modules/', 1)[0]
+                          if parent not in bp:
+                              raise Bad('missing parent package node')
+                      if key in seen:
+                          bv = _check_node(name, bp[key])
+                          av = _check_node(name, ap[key])
+                          _upgrade(bp[key], ap[key], bv, av)
+                  except Bad as e:
+                      raise Bad(key + ': ' + str(e))
+              if not changed:
+                  raise Bad('no package node changed (no update)')
+              if len(changed) > cap:
+                  raise Bad('too many changed nodes')
+              return {'STATUS': 'OK',
+                      'reason': 'eligible for human review: %d changed node(s); this is not a merge approval' % len(changed),
+                      'changed_nodes': list(changed)}
+
+
+          def classify_change(before_lock_str, after_lock_str, before_manifest_str, after_manifest_str, policy):
+              changed = []
+              try:
+                  return _run(before_lock_str, after_lock_str, before_manifest_str,
+                              after_manifest_str, policy, changed)
+              except Bad as e:
+                  reason = str(e)
+              except Exception:
+                  reason = 'internal validation error'
+              return {'STATUS': 'HOLD', 'reason': reason, 'changed_nodes': list(changed)}
+          OWL_EOF_CLASSIFIER
+          cat > "$GATE_DIR/evidence_adapter.py" <<'OWL_EOF_EVIDENCE'
+          '''Read-only GitHub REST evidence collector for same-repo Dependabot PRs.
+
+          Stdlib only. Transport is injected: get(api_path) -> parsed JSON; it must raise on any HTTP error.
+          GET-only. Never fetches or executes PR code. eligibility is always False in this version.
+          '''
+          BOT_ID = 49699333
+          PER_PAGE, MAX_PAGES, MAX_CAP = 100, 10, 500
+          POLICY_KEYS = {'repo', 'repo_id', 'bot_id', 'base_branch', 'expected_checks', 'allowed_paths', 'max_requests'}
+          SAFE = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
+
+
+          class Hold(Exception):
+              pass
+
+
+          def need(cond, msg):
+              if not cond:
+                  raise Hold(msg)
+
+
+          def is_int(x):
+              return type(x) is int  # excludes bool
+
+
+          def is_str(x):
+              return type(x) is str
+
+
+          def is_sha(x):
+              return is_str(x) and len(x) == 40 and set(x) <= set('0123456789abcdef') and x != '0' * 40
+
+
+          def obj(x, what):
+              need(type(x) is dict, what + ': expected object')
+              return x
+
+
+          def bad_path(p):
+              if not is_str(p) or not p or p.startswith('/') or chr(92) in p:
+                  return True
+              if any(ord(c) < 32 or ord(c) == 127 for c in p):
+                  return True
+              return any(s in ('', '.', '..') or s.lower() == '.github' for s in p.split('/'))
+
+
+          def check_policy(pol, n):
+              need(type(pol) is dict and set(pol) == POLICY_KEYS, 'policy keys must be exactly ' + ','.join(sorted(POLICY_KEYS)))
+              need(is_int(n) and n > 0, 'pr_number must be a positive int')
+              repo = pol['repo']
+              need(is_str(repo) and repo.count('/') == 1 and all(p and set(p) <= SAFE for p in repo.split('/')), 'policy repo invalid')
+              need(is_int(pol['repo_id']) and pol['repo_id'] > 0, 'policy repo_id invalid')
+              need(is_int(pol['bot_id']) and pol['bot_id'] == BOT_ID, 'policy bot_id must be 49699333')
+              br = pol['base_branch']
+              need(is_str(br) and set(br) <= SAFE | {'/'} and not bad_path(br), 'policy base_branch invalid')
+              ec = pol['expected_checks']
+              need(type(ec) is dict and ec and all(is_str(k) and k and is_int(v) and v > 0 for k, v in ec.items()),
+                   'policy expected_checks invalid')
+              ap = pol['allowed_paths']
+              need(type(ap) is list and ap and all(is_str(p) for p in ap), 'policy allowed_paths invalid')
+              need(not any(bad_path(p) for p in ap) and len(set(ap)) == len(ap), 'policy allowed_paths unsafe or duplicated')
+              cap = pol['max_requests']
+              need(is_int(cap) and 1 <= cap <= MAX_CAP, 'policy max_requests must be a finite int cap')
+
+
+          class Api:
+              def __init__(self, get, cap):
+                  self.get, self.cap, self.n = get, cap, 0
+
+              def one(self, path):
+                  self.n += 1
+                  need(self.n <= self.cap, 'request cap exceeded')
+                  return self.get(path)
+
+              def pages(self, path, key=None):
+                  # ?page=N&per_page=100, at most MAX_PAGES pages; a full final page at the cap is a HOLD.
+                  sep = '&' if '?' in path else '?'
+                  out, total = [], None
+                  for page in range(1, MAX_PAGES + 1):
+                      data = self.one('%s%spage=%d&per_page=%d' % (path, sep, page, PER_PAGE))
+                      items = data
+                      if key:
+                          obj(data, path)
+                          t = data.get('total_count')
+                          need(is_int(t) and t >= 0, path + ': bad total_count')
+                          need(total in (None, t), path + ': total_count changed across pages')
+                          total, items = t, data.get(key)
+                      need(type(items) is list and len(items) <= PER_PAGE, path + ': bad page')
+                      need(all(type(i) is dict for i in items), path + ': non-object item')
+                      out += items
+                      if len(items) < PER_PAGE:
+                          break
+                  else:
+                      raise Hold(path + ': page cap reached with a full page')
+                  need(total is None or len(out) == total, path + ': total_count != items collected')
+                  return out
+
+
+          def read_pr(api, pol, n):
+              pr = obj(api.one('/repos/%s/pulls/%d' % (pol['repo'], n)), 'pr')
+              need(pr.get('number') == n and is_int(pr.get('number')), 'PR number mismatch')
+              need(pr.get('state') == 'open' and pr.get('draft') is False and pr.get('mergeable') is True,
+                   'PR must be open, non-draft and mergeable is true')
+              head, base = obj(pr.get('head'), 'head'), obj(pr.get('base'), 'base')
+              for side in (head, base):
+                  r = obj(side.get('repo'), 'repo')
+                  need(is_int(r.get('id')) and r['id'] == pol['repo_id'] and r.get('full_name') == pol['repo'],
+                       'head/base repository must equal policy repo (same-repo PR)')
+                  need(is_sha(side.get('sha')), 'head/base sha must be 40 lowercase hex, not all zero')
+              need(base.get('ref') == pol['base_branch'], 'base branch mismatch')
+              need(is_str(head.get('ref')) and head['ref'].startswith('dependabot/') and len(head['ref']) > 11,
+                   'head branch must be dependabot/*')
+              u = obj(pr.get('user'), 'user')
+              need(is_int(u.get('id')) and u['id'] == pol['bot_id'] and u.get('type') == 'Bot'
+                   and u.get('login') == 'dependabot[bot]', 'PR author is not the trusted Dependabot bot')
+              need(is_int(pr.get('changed_files')), 'PR changed_files missing')
+              need(is_int(pr.get('commits')) and 1 <= pr['commits'] <= 250, 'PR commit count missing or over cap')
+              return pr
+
+
+          def read_ref(api, pol):
+              r = obj(api.one('/repos/%s/git/ref/heads/%s' % (pol['repo'], pol['base_branch'])), 'ref')
+              o = obj(r.get('object'), 'ref object')
+              need(r.get('ref') == 'refs/heads/' + pol['base_branch'] and o.get('type') == 'commit' and is_sha(o.get('sha')),
+                   'bad base branch ref')
+              return o['sha']
+
+
+          def read_checks(api, pol, head):
+              base = '/repos/%s/commits/%s' % (pol['repo'], head)
+              runs = api.pages(base + '/check-runs?filter=latest', 'check_runs')
+              need(runs, 'zero check runs')
+              ids, names = set(), {}
+              for r in runs:
+                  need(is_int(r.get('id')) and is_str(r.get('name')) and r['name'], 'malformed check run')
+                  need(r['id'] not in ids, 'duplicate check run id')
+                  need(r['name'] not in names, 'duplicate check name (conservative HOLD)')
+                  need(r.get('head_sha') == head, 'check head_sha mismatch: ' + r['name'])
+                  need(r.get('status') == 'completed' and r.get('conclusion') == 'success',
+                       'check not completed/success: ' + r['name'])
+                  app = r.get('app')
+                  need(type(app) is dict and is_int(app.get('id')), 'check app id missing: ' + r['name'])
+                  ids.add(r['id'])
+                  names[r['name']] = app['id']
+              for name, app_id in pol['expected_checks'].items():
+                  need(names.get(name) == app_id, 'expected check missing or app_id mismatch: ' + name)
+              sts = api.pages(base + '/statuses')
+              sids, ctxs = set(), set()
+              for s in sts:
+                  need(is_int(s.get('id')) and is_str(s.get('context')) and s['context'], 'malformed status')
+                  need(s['id'] not in sids, 'duplicate status id')
+                  sids.add(s['id'])
+                  context = s['context'].casefold()
+                  if context in ctxs:
+                      continue  # API returns newest first; older history cannot override it.
+                  need(s.get('state') == 'success', 'status not success: ' + s['context'])
+                  ctxs.add(context)
+              return ([{'id': r['id'], 'name': r['name'], 'app_id': r['app']['id']} for r in runs],
+                      [{'id': s['id'], 'context': s['context']} for s in sts])
+
+
+          def read_commits(api, pol, n, head, expected_count):
+              cs = api.pages('/repos/%s/pulls/%d/commits' % (pol['repo'], n))
+              need(cs, 'no PR commits')
+              seen = []
+              for c in cs:
+                  need(is_sha(c.get('sha')) and c['sha'] not in seen, 'bad or duplicate commit sha')
+                  a = c.get('author')
+                  need(type(a) is dict and is_int(a.get('id')) and a['id'] == pol['bot_id'],
+                       'commit not authored by trusted bot (numeric id)')
+                  v = obj(obj(c.get('commit'), 'commit').get('verification'), 'verification')
+                  need(v.get('verified') is True and v.get('reason') == 'valid', 'commit verification not valid')
+                  committer = obj(c.get('committer'), 'committer')
+                  need(is_int(committer.get('id')) and committer['id'] in (BOT_ID, 19864447),
+                       'commit committer must be Dependabot or GitHub web-flow')
+                  seen.append(c['sha'])
+              need(len(seen) == expected_count, 'PR commit count mismatch')
+              need(seen[-1] == head, 'PR head sha is not the final PR commit')
+              return seen
+
+
+          def read_files(api, pol, n, pr):
+              fs = api.pages('/repos/%s/pulls/%d/files' % (pol['repo'], n))
+              need(fs, 'no changed files')
+              need(pr['changed_files'] == len(fs), 'changed_files != files fetched')
+              seen, out = set(), []
+              for f in fs:
+                  p = f.get('filename')
+                  need(not bad_path(p), 'unsafe path: ' + repr(p))
+                  need(p not in seen, 'duplicate path: ' + p)
+                  need(p in pol['allowed_paths'], 'path not in allowlist: ' + p)
+                  need(f.get('status') == 'modified' and 'previous_filename' not in f, 'only modified files allowed: ' + p)
+                  need(is_int(f.get('additions')) and is_int(f.get('deletions')), 'bad change counts: ' + p)
+                  seen.add(p)
+                  out.append({'filename': p, 'status': 'modified', 'additions': f['additions'], 'deletions': f['deletions']})
+              return out
+
+
+          def hold(reason):
+              return {'STATUS': 'HOLD', 'eligibility': False, 'reason': reason}
+
+
+          def collect(get, policy, pr_number):
+              try:
+                  check_policy(policy, pr_number)
+                  api = Api(get, policy['max_requests'])
+                  ref0 = read_ref(api, policy)
+                  pr = read_pr(api, policy, pr_number)
+                  head, base = pr['head']['sha'], pr['base']['sha']
+                  checks, statuses = read_checks(api, policy, head)
+                  commits = read_commits(api, policy, pr_number, head, pr['commits'])
+                  files = read_files(api, policy, pr_number, pr)
+                  pr2 = read_pr(api, policy, pr_number)
+                  ref1 = read_ref(api, policy)
+                  need(ref0 == ref1, 'base branch moved during collection')
+                  need(pr2['head']['sha'] == head and pr2['base']['sha'] == base, 'PR head/base changed during collection')
+                  return {
+                      'STATUS': 'SNAPSHOT_READY', 'eligibility': False,
+                      'reason': 'classifier and current-base proof not implemented',
+                      'pr': {'repo': policy['repo'], 'number': pr_number, 'head_sha': head, 'base_sha': base,
+                             'head_ref': pr['head']['ref'], 'base_ref': pr['base']['ref'], 'author_id': pr['user']['id']},
+                      'base_ref_sha': ref1, 'base_sha_matches_ref': base == ref1,
+                      'base_behind': 'unknown', 'test_integration_claimed': False, 'live_verified': False,
+                      'files': files, 'commits': commits, 'checks': checks, 'statuses': statuses, 'requests': api.n,
+                  }
+              except Hold as e:
+                  return hold(str(e))
+              except Exception as e:  # transport/HTTP errors and malformed payloads
+                  return hold('transport or parse error: %s: %s' % (type(e).__name__, e))
+          OWL_EOF_EVIDENCE
+          cat > "$GATE_DIR/integration.py" <<'OWL_EOF_INTEGRATION'
+          '''Dependabot merge-on-green gate (stdlib only, runs in the privileged job).
+
+          Finds open same-repo Dependabot PRs, re-proves fresh provider evidence, and squash-merges at most one per run.
+          Untrusted: PR content, lockfiles, job logs, check and file names, every API response.
+          Trusted: classifier.py, evidence_adapter.py and this file, embedded by the coordinator in reusable.yml.
+          Never checks out or executes PR code. Only api.github.com gets the token; the job-log redirect is fetched without it.
+          '''
+          import base64
+          import binascii
+          import json
+          import os
+          import re
+          import ssl
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          HERE = os.path.dirname(os.path.abspath(__file__))
+          if HERE not in sys.path:  # python -I drops the script dir from sys.path
+              sys.path.insert(0, HERE)
+          import classifier  # noqa: E402
+          import evidence_adapter as ev  # noqa: E402
+
+          UA = 'silver-owl-dependabot-gate'
+          TIMEOUT, MAX_BODY, MAX_LOG, MAX_TOTAL, MAX_PRS, MAX_FILE = 20, 8000000, 4000000, 600, 10, 1500000
+          LABEL = 'needs-rob'
+          PATH_OK = re.compile(r'^/[A-Za-z0-9/._?&=:@-]{1,400}$')
+          # GitHub compare uses a literal three-dot separator; allow this exact immutable-SHA
+          # route without permitting traversal or arbitrary double-dot path components.
+          COMPARE_PATH = re.compile(r'/repos/[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*/'
+                                    r'[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*/compare/'
+                                    r'[0-9a-f]{40}[.]{3}[0-9a-f]{40}[?]per_page=1')
+          MUT_OK = re.compile(r'^(PUT /repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pulls/[0-9]+/merge'
+                              r'|POST /repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/issues/[0-9]+/labels)$')
+          LOG_HOST = re.compile(r'^(?:[a-z0-9-]+[.])+githubusercontent[.]com$|^productionresultssa[0-9]+[.]blob[.]core[.]windows[.]net$')
+          LINE = re.compile(r'^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?DEPENDABOT_METADATA_ENVELOPE_V1:([A-Za-z0-9+/]+={0,2}):END_ENVELOPE$')
+          CI_PATH = re.compile(r'^[.]github/workflows/[A-Za-z0-9._-]+[.]ya?ml$')
+          JOB_NAME = re.compile(r'^[A-Za-z0-9 _-]{1,64}$')
+          OK_UPDATES = ('version-update:semver-patch', 'version-update:semver-minor')
+          MAJOR = 'version-update:semver-major'
+          POLICY_PREFIXES = ('unsafe path', 'path not in allowlist', 'only modified files', 'duplicate path')
+
+
+          class Policy(ev.Hold):
+              '''Substantive hold that needs Rob (gets the needs-rob label). Every other Hold means wait.'''
+
+
+          class HttpStatus(RuntimeError):
+              def __init__(self, code, what):
+                  RuntimeError.__init__(self, 'HTTP %d on %s' % (code, what))
+                  self.code = code
+
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None  # never follow: Authorization must not travel to another host
+
+
+          def _opener():
+              return urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+
+
+          def _read(opener, req, cap, want_location=False):
+              '''Returns bytes, or the Location string for a 302 when want_location. Body is capped.'''
+              try:
+                  with opener.open(req, timeout=TIMEOUT) as r:
+                      raw = r.read(cap + 1)
+              except urllib.error.HTTPError as e:
+                  code, loc = e.code, (e.headers.get('Location') if want_location and e.code == 302 else None)
+                  e.close()
+                  if loc:
+                      return loc
+                  raise HttpStatus(code, req.get_method() + ' ' + urllib.parse.urlsplit(req.full_url).path)
+              ev.need(len(raw) <= cap, 'response too large')
+              return raw
+
+
+          class GitHub:
+              '''Authenticated REST client. Host is fixed; paths are validated; mutations are whitelisted; requests are counted.'''
+
+              def __init__(self, token, cap=MAX_TOTAL):
+                  self.token, self.cap, self.n, self.opener = token, cap, 0, _opener()
+
+              def _send(self, method, path, body, want_location):
+                  data = None if body is None else json.dumps(body).encode()
+                  req = urllib.request.Request('https://api.github.com' + path, data=data, method=method)
+                  req.add_header('Authorization', 'Bearer ' + self.token)
+                  req.add_header('Accept', 'application/vnd.github+json')
+                  req.add_header('X-GitHub-Api-Version', '2022-11-28')
+                  req.add_header('User-Agent', UA)
+                  if data is not None:
+                      req.add_header('Content-Type', 'application/json')
+                  raw = _read(self.opener, req, MAX_BODY, want_location)
+                  if want_location:
+                      ev.need(type(raw) is str, 'log endpoint did not redirect')
+                      return raw
+                  return json.loads(raw.decode('utf-8'))
+
+              def call(self, method, path, body=None, want_location=False):
+                  ev.need(type(path) is str and PATH_OK.fullmatch(path) and '//' not in path
+                          and ('..' not in path or COMPARE_PATH.fullmatch(path)),
+                          'refusing unsafe API path')
+                  ev.need(method == 'GET' or MUT_OK.fullmatch(method + ' ' + path.split('?')[0]), 'refusing unlisted mutation')
+                  self.n += 1
+                  ev.need(self.n <= self.cap, 'run request cap exceeded')
+                  return self._send(method, path, body, want_location)
+
+              def get(self, path):
+                  return self.call('GET', path)
+
+
+          def fetch_log(location):
+              '''Unauthenticated fetch of the job-log redirect target: HTTPS, GitHub-owned hosts only, size capped.'''
+              # urlsplit strips raw control characters; reject them before host validation.
+              ev.need(type(location) is str and len(location) < 4096
+                      and not any(ord(c) <= 32 or ord(c) == 127 for c in location),
+                      'log redirect target contains invalid characters')
+              u = urllib.parse.urlsplit(location)
+              ev.need(u is not None and u.scheme == 'https' and u.username is None and u.port in (None, 443)
+                      and u.hostname and LOG_HOST.fullmatch(u.hostname.lower()), 'log redirect target is not an allowed HTTPS host')
+              raw = _read(_opener(), urllib.request.Request(location, headers={'User-Agent': UA}), MAX_LOG)
+              return raw.decode('utf-8', 'replace')
+
+
+          def _pairs(pairs):
+              out = {}
+              for k, v in pairs:
+                  ev.need(k not in out, 'duplicate JSON key in envelope')
+                  out[k] = v
+              return out
+
+
+          def snapshot(api, pol, n):
+              s = ev.collect(api.get, pol, n)
+              if s.get('STATUS') != 'SNAPSHOT_READY':
+                  r = str(s.get('reason'))
+                  raise (Policy if r.startswith(POLICY_PREFIXES) else ev.Hold)(r)
+              return s
+
+
+          def prove_ancestry(api, repo, base, head):
+              '''Head descends from the CURRENT base tip (PR.base.sha alone proves nothing about ancestry).'''
+              c = ev.obj(api.get('/repos/%s/compare/%s...%s?per_page=1' % (repo, base, head)), 'compare')
+              mb = ev.obj(c.get('merge_base_commit'), 'merge_base_commit')
+              ev.need(c.get('status') == 'ahead' and ev.is_int(c.get('behind_by')) and c['behind_by'] == 0
+                      and mb.get('sha') == base, 'head does not descend from the current base tip (behind or diverged)')
+
+
+          def _contents(api, repo, path, ref):
+              d = ev.obj(api.get('/repos/%s/contents/%s?ref=%s' % (repo, path, ref)), 'contents')
+              ev.need(d.get('type') == 'file' and d.get('path') == path and ev.is_str(d.get('sha')), 'contents entry malformed: ' + path)
+              return d
+
+
+          def read_text(api, repo, path, ref):
+              d = _contents(api, repo, path, ref)
+              if d.get('encoding') != 'base64' or not ev.is_str(d.get('content')) or not ev.is_int(d.get('size')) or d['size'] > MAX_FILE:
+                  raise Policy('file too large or not inlined by the contents API: ' + path)
+              try:
+                  raw = base64.b64decode(d['content'].replace(chr(10), ''), validate=True)
+                  text = raw.decode('utf-8')
+              except ValueError:  # binascii.Error and UnicodeDecodeError are ValueErrors
+                  raise ev.Hold('contents decode failed: ' + path)
+              ev.need(len(raw) == d['size'], 'contents size mismatch: ' + path)
+              return text
+
+
+          def newest_ci_run(api, pol, head, ci_path):
+              runs = ev.Api(api.get, 20).pages(
+                  '/repos/%s/actions/runs?head_sha=%s&event=pull_request&exclude_pull_requests=true' % (pol['repo'], head),
+                  'workflow_runs')
+              cand = [r for r in runs if ev.is_str(r.get('path')) and r['path'].split('@')[0] == ci_path]
+              ev.need(cand, 'expected CI run not found for head')
+              for r in cand:
+                  ev.need(ev.is_int(r.get('id')) and ev.is_int(r.get('run_number')) and ev.is_int(r.get('run_attempt'))
+                          and r['run_attempt'] > 0, 'malformed CI run')
+              top = max(r['run_number'] for r in cand)
+              newest = [r for r in cand if r['run_number'] == top]
+              ev.need(len(newest) == 1, 'ambiguous newest CI run')
+              r = newest[0]
+              hr = r.get('head_repository')
+              ev.need(r.get('head_sha') == head and r.get('event') == 'pull_request', 'CI run head or event mismatch')
+              ev.need(type(hr) is dict and hr.get('id') == pol['repo_id'] and hr.get('full_name') == pol['repo'],
+                      'CI run head repository mismatch')
+              ev.need(r.get('status') == 'completed' and r.get('conclusion') == 'success', 'newest CI run not completed/success')
+              return r
+
+
+          def metadata_job_id(api, repo, run, head, name):
+              jobs = ev.Api(api.get, 20).pages('/repos/%s/actions/runs/%d/attempts/%d/jobs' % (repo, run['id'], run['run_attempt']), 'jobs')
+              m = [j for j in jobs if j.get('name') == name]
+              ev.need(len(m) == 1, 'metadata job missing or ambiguous')
+              j = m[0]
+              ev.need(ev.is_int(j.get('id')) and j.get('run_id') == run['id'] and j.get('run_attempt') == run['run_attempt']
+                      and j.get('head_sha') == head, 'metadata job does not belong to the CI run attempt')
+              ev.need(j.get('status') == 'completed' and j.get('conclusion') == 'success', 'metadata job not completed/success')
+              return j['id']
+
+
+          def parse_envelope(log, head):
+              '''Exactly one anchored envelope line; every member must be patch or minor. Duplicates or forgeries HOLD.'''
+              found = []
+              for line in log.splitlines():
+                  m = LINE.fullmatch(line.lstrip(chr(0xfeff)).rstrip())
+                  if m:
+                      found.append(m.group(1))
+              ev.need(len(found) == 1, 'metadata envelope missing or ambiguous')
+              ev.need(len(found[0]) <= 200000, 'metadata envelope too large')
+              try:
+                  env = json.loads(base64.b64decode(found[0], validate=True).decode('utf-8'), object_pairs_hook=_pairs)
+              except (ValueError, RecursionError):
+                  raise ev.Hold('metadata envelope undecodable')
+              ev.need(type(env) is dict and set(env) == {'schema', 'head_sha', 'metadata'} and type(env['schema']) is int
+                      and env['schema'] == 1, 'metadata envelope schema invalid')
+              ev.need(env['head_sha'] == head, 'metadata envelope head_sha mismatch')
+              m = env['metadata']
+              ev.need(type(m) is dict and set(m) == {'update_type', 'updated_dependencies'}, 'metadata fields invalid')
+              deps = m['updated_dependencies']
+              ev.need(ev.is_str(m['update_type']) and type(deps) is list and 0 < len(deps) <= 100, 'metadata empty or malformed')
+              types = [m['update_type']]
+              for d in deps:
+                  ev.need(type(d) is dict and ev.is_str(d.get('dependencyName')) and d['dependencyName']
+                          and ev.is_str(d.get('updateType')), 'malformed dependency metadata')
+                  types.append(d['updateType'])
+              if MAJOR in types:
+                  raise Policy('major version update')
+              ev.need(all(t in OK_UPDATES for t in types), 'unsupported or unknown update type')
+              return len(deps)
+
+
+          def evaluate(api, pol, cfg, n, fetch):
+              '''Raises Policy (needs Rob) or Hold (wait). Returns the head sha only when every proof holds and was re-read.'''
+              repo, ci = pol['repo'], cfg['ci_path']
+              s1 = snapshot(api, pol, n)
+              ev.need(s1.get('base_sha_matches_ref') is True, 'PR base differs from current base ref in initial snapshot')
+              head, base = s1['pr']['head_sha'], s1['base_ref_sha']
+              prove_ancestry(api, repo, base, head)
+              ev.need(_contents(api, repo, ci, base)['sha'] == _contents(api, repo, ci, head)['sha'],
+                      'CI workflow blob differs between head and current base')
+              t = {(r, p): read_text(api, repo, p, r) for r in (base, head) for p in ('package-lock.json', 'package.json')}
+              v = classifier.classify_change(t[(base, 'package-lock.json')], t[(head, 'package-lock.json')],
+                                             t[(base, 'package.json')], t[(head, 'package.json')],
+                                             {'max_changed_nodes': cfg['max_nodes']})
+              if v.get('STATUS') != 'OK':
+                  raise Policy('classifier HOLD: %s' % v.get('reason'))
+              run = newest_ci_run(api, pol, head, ci)
+              job = metadata_job_id(api, repo, run, head, cfg['metadata_job'])
+              loc = api.call('GET', '/repos/%s/actions/jobs/%d/logs' % (repo, job), want_location=True)
+              parse_envelope(fetch(loc), head)
+              # fresh re-read immediately before the merge call
+              s2 = snapshot(api, pol, n)
+              ev.need(s2.get('base_sha_matches_ref') is True, 'evidence changed: PR base differs from current base ref in final snapshot')
+              key = lambda s: (s['pr']['head_sha'], s['base_ref_sha'], sorted(c['id'] for c in s['checks']),
+                               sorted(c['id'] for c in s['statuses']))
+              ev.need(key(s1) == key(s2), 'evidence changed during evaluation')
+              run2 = newest_ci_run(api, pol, head, ci)
+              ev.need((run2['id'], run2['run_attempt']) == (run['id'], run['run_attempt']), 'CI run or attempt changed')
+              ev.need(ev.read_ref(ev.Api(api.get, 2), pol) == base, 'base branch moved before merge')
+              return head
+
+
+          def try_merge(api, repo, n, head):
+              '''Merge SHA, ev.Hold when GitHub definitely refused, RuntimeError when the outcome is unknown.
+              The sha parameter guards the head only; base freshness is bounded by the re-reads above, not a server CAS.'''
+              try:
+                  r = api.call('PUT', '/repos/%s/pulls/%d/merge' % (repo, n), {'merge_method': 'squash', 'sha': head})
+              except ev.Hold:
+                  raise  # refused before anything was sent
+              except HttpStatus as e:
+                  if e.code < 500:
+                      raise ev.Hold('merge refused by GitHub: %s' % e)
+                  raise RuntimeError('merge outcome unknown: %s' % e)
+              except Exception as e:
+                  raise RuntimeError('merge outcome unknown: ' + type(e).__name__)
+              if type(r) is dict and r.get('merged') is True and ev.is_sha(r.get('sha')):
+                  return r['sha']
+              raise RuntimeError('merge outcome unknown: unexpected response')
+
+
+          def flag_for_rob(api, repo, n):
+              try:
+                  issue = ev.obj(api.get('/repos/%s/issues/%d' % (repo, n)), 'issue')
+                  names = [x.get('name') for x in issue.get('labels', []) if type(x) is dict]
+                  if LABEL in names:
+                      return 'already labelled'
+                  api.call('POST', '/repos/%s/issues/%d/labels' % (repo, n), {'labels': [LABEL]})
+                  return 'labelled'
+              except Exception as e:
+                  return 'label failed: ' + type(e).__name__
+
+
+          def candidates(api, pol, only):
+              if only:
+                  return [only]
+              ps = ev.Api(api.get, 20).pages('/repos/%s/pulls?state=open&base=%s&sort=created&direction=asc'
+                                             % (pol['repo'], pol['base_branch']))
+              nums = {p['number'] for p in ps if type(p.get('number')) is int and type(p.get('user')) is dict
+                      and p['user'].get('id') == ev.BOT_ID}
+              return sorted(nums)[:MAX_PRS]
+
+
+          def run_gate(api, pol, cfg, fetch=None):
+              '''Returns (results, merged). At most one merge; no retries. RuntimeError means merge outcome unknown.'''
+              fetch = fetch or fetch_log
+              results, merged = [], None
+              try:
+                  nums = candidates(api, pol, cfg['only_pr'])
+              except Exception as e:
+                  return [(0, 'WAIT', 'candidate listing failed: ' + type(e).__name__)], None
+              for n in nums:
+                  try:
+                      head = evaluate(api, pol, cfg, n, fetch)
+                  except Policy as e:
+                      results.append((n, 'POLICY', '%s; %s' % (e, flag_for_rob(api, pol['repo'], n))))
+                      continue
+                  except Exception as e:
+                      results.append((n, 'WAIT', str(e) if isinstance(e, ev.Hold) else 'error: ' + type(e).__name__))
+                      continue
+                  try:
+                      sha = try_merge(api, pol['repo'], n, head)
+                  except ev.Hold as e:
+                      results.append((n, 'WAIT', str(e)))
+                      continue
+                  merged = (n, sha)
+                  results.append((n, 'MERGED', sha))
+                  break
+              return results, merged
+
+
+          def load_config(env):
+              try:
+                  pol = {'repo': env['GATE_REPO'], 'repo_id': int(env['GATE_REPO_ID']), 'bot_id': ev.BOT_ID,
+                         'base_branch': env['GATE_BASE_BRANCH'], 'expected_checks': json.loads(env['GATE_EXPECTED_CHECKS']),
+                         'allowed_paths': ['package.json', 'package-lock.json'], 'max_requests': 150}
+                  only = env.get('GATE_ONLY_PR', '')
+                  cfg = {'ci_path': env['GATE_CI_PATH'], 'metadata_job': env['GATE_METADATA_JOB'],
+                         'max_nodes': int(env['GATE_MAX_NODES']), 'only_pr': int(only) if only else 0}
+              except (KeyError, ValueError):
+                  raise ev.Hold('gate configuration missing or malformed')
+              ev.check_policy(pol, 1)
+              ev.need(env.get('GITHUB_REPOSITORY') == pol['repo'], 'GATE_REPO differs from GITHUB_REPOSITORY')
+              ev.need(CI_PATH.fullmatch(cfg['ci_path']) and JOB_NAME.fullmatch(cfg['metadata_job'])
+                      and 1 <= cfg['max_nodes'] <= 20 and cfg['only_pr'] >= 0, 'gate config out of range')
+              return pol, cfg
+
+
+          def clean(s, token=''):
+              '''Log-safe text: masks the token, drops control characters and workflow-command prefixes.'''
+              s = str(s)
+              if token:
+                  s = s.replace(token, '***')
+              s = re.sub(r'[^A-Za-z0-9 _.,;:/@#()=+-]', '?', s)[:240]
+              return s.replace('::', ': ')
+
+
+          def emit(env, results, merged, token=''):
+              lines = ['gate pr=%s state=%s: %s' % (n, st, clean(why, token)) for n, st, why in results]
+              for line in lines:
+                  print(line)
+              if env.get('GITHUB_OUTPUT'):
+                  with open(env['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(chr(10).join(['merge_sha=%s' % (merged[1] if merged else ''),
+                                            'merged_pr=%s' % (merged[0] if merged else '')]) + chr(10))
+              if env.get('GITHUB_STEP_SUMMARY'):
+                  with open(env['GITHUB_STEP_SUMMARY'], 'a') as f:
+                      f.write(chr(10).join(['- ' + x for x in lines] or ['- no candidates']) + chr(10))
+
+
+          def main(env=None):
+              env = os.environ if env is None else env
+              token = env.get('GITHUB_TOKEN', '')
+              try:
+                  ev.need(token, 'GITHUB_TOKEN missing')
+                  pol, cfg = load_config(env)
+              except Exception as e:
+                  print('gate config error: ' + clean(e, token))
+                  return 2
+              try:
+                  results, merged = run_gate(GitHub(token), pol, cfg)
+              except RuntimeError as e:
+                  print('gate ' + clean(e, token))
+                  return 1
+              emit(env, results, merged, token)
+              return 0
+
+
+          if __name__ == '__main__':
+              sys.exit(main())
+          OWL_EOF_INTEGRATION
+          sha256sum "$GATE_DIR"/*.py
+      - name: Evaluate and merge at most one PR
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GATE_REPO: ${{ github.repository }}
+          GATE_REPO_ID: ${{ inputs.repo_id }}
+          GATE_BASE_BRANCH: ${{ inputs.base_branch }}
+          GATE_EXPECTED_CHECKS: ${{ inputs.expected_checks }}
+          GATE_CI_PATH: ${{ inputs.ci_workflow_path }}
+          GATE_METADATA_JOB: ${{ inputs.metadata_job_name }}
+          GATE_MAX_NODES: ${{ inputs.max_changed_nodes }}
+          GATE_ONLY_PR: ${{ inputs.only_pr }}
+        run: python3 -I "$RUNNER_TEMP/gate/integration.py"
