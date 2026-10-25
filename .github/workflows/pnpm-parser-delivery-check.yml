@@ -1,0 +1,183 @@
+# pnpm-parser-delivery-check.yml
+# SOURCE ONLY. AUTHOR TESTS: NOT RUN. Isolated validation candidate for PyYAML delivery.
+# Not part of the merge gate. No Suite activation. No checkout, cache, artifacts, secrets or outputs.
+# The job exports no proof and nothing here is consumed by any privileged job.
+name: pnpm-parser-delivery-check
+"on":
+  pull_request:
+    paths:
+      - '.github/workflows/pnpm-parser-delivery-check.yml'
+
+permissions: {}
+
+jobs:
+  pyyaml-delivery-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      WHEEL_NAME: pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+      WHEEL_SIZE: '807870'
+      WHEEL_SHA256: ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+      WHEEL_URL: https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+    steps:
+      - name: Set up CPython 3.12.15 (no checkout, no cache, empty token)
+        id: py
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+          allow-prereleases: false
+          check-latest: false
+          token: ''
+
+      - name: Check interpreter identity
+        env:
+          PYBIN: ${{ steps.py.outputs.python-path }}
+          TOOL_CACHE: ${{ runner.tool_cache }}
+        run: |
+          set -euo pipefail
+          "$PYBIN" -I - "$TOOL_CACHE" <<'PYEOF'
+          import os, platform, sys
+          assert sys.version_info[:3] == (3, 12, 15), sys.version
+          assert sys.platform == 'linux' and platform.machine() == 'x86_64'
+          tc = os.path.realpath(sys.argv[1])
+          exe = os.path.realpath(sys.executable)
+          assert exe.startswith(tc + os.sep), (exe, tc)
+          print('interpreter', exe, sys.version.split()[0])
+          PYEOF
+
+      - name: Fetch wheel, run negative controls, install offline hash-locked binary-only
+        env:
+          PYBIN: ${{ steps.py.outputs.python-path }}
+          DELIVERY_ROOT: ${{ runner.temp }}/pyyaml-delivery
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$DELIVERY_ROOT"   # fails if it already exists: must be fresh
+          mkdir "$DELIVERY_ROOT/wheel" "$DELIVERY_ROOT/work" "$DELIVERY_ROOT/home"
+          cd "$DELIVERY_ROOT/work"
+          # Exact public HTTPS URL; -q first disables curlrc; no redirects, no proxy, size-capped, default TLS verification.
+          curl -q --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --max-redirs 0 --noproxy '*' --max-filesize "$WHEEL_SIZE" --max-time 120 \
+            --output "$DELIVERY_ROOT/wheel/$WHEEL_NAME" "$WHEEL_URL"
+          test "$(stat -c %s "$DELIVERY_ROOT/wheel/$WHEEL_NAME")" = "$WHEEL_SIZE"
+          # Positive control: the real hash must verify.
+          printf '%s  %s\n' "$WHEEL_SHA256" "$WHEEL_NAME" | (cd "$DELIVERY_ROOT/wheel" && sha256sum -c -)
+          # Negative control: a fixed all-zero SHA256 against the SAME already-downloaded wheel must be rejected.
+          ZERO_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+          rc=0
+          out="$(printf '%s  %s\n' "$ZERO_SHA256" "$WHEEL_NAME" | (cd "$DELIVERY_ROOT/wheel" && sha256sum -c - 2>&1))" || rc=$?
+          if [ "$rc" != 1 ]; then echo "CONTROL-FAIL wrong-checksum: expected exit 1, got $rc"; exit 1; fi
+          case "$out" in
+            *"$WHEEL_NAME: FAILED"*) echo 'CONTROL-OK wrong checksum rejected' ;;
+            *) echo 'CONTROL-FAIL wrong-checksum: FAILED marker missing'; exit 1 ;;
+          esac
+          # Literal hash-locked requirement; the repo is never read.
+          printf 'PyYAML==6.0.3 --hash=sha256:%s\n' "$WHEEL_SHA256" > "$DELIVERY_ROOT/work/requirements.lock"
+          "$PYBIN" -I -m venv "$DELIVERY_ROOT/venv"
+          # Negative control: before install, yaml must be absent from the fresh venv.
+          env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" PIP_CONFIG_FILE=/dev/null \
+            "$DELIVERY_ROOT/venv/bin/python" -I - "$DELIVERY_ROOT/venv" <<'NOYAML'
+          import os, sys
+          venv = os.path.realpath(sys.argv[1])
+          assert sys.flags.isolated == 1 and os.path.realpath(sys.prefix) == venv
+          try:
+              import yaml
+          except ModuleNotFoundError as exc:
+              if exc.name != 'yaml':
+                  raise SystemExit('CONTROL-FAIL missing-parser: wrong module name ' + repr(exc.name))
+              print('CONTROL-OK yaml absent before install')
+          else:
+              raise SystemExit('CONTROL-FAIL missing-parser: yaml importable before install ' + str(yaml.__file__))
+          NOYAML
+          # Prove the actual bundled pip/version and empty configuration before installing.
+          env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" PIP_CONFIG_FILE=/dev/null \
+            "$DELIVERY_ROOT/venv/bin/python" -I - "$DELIVERY_ROOT/venv" <<'PIPEOF'
+          import os, sys, pip
+          from pip._internal.configuration import Configuration
+          venv = os.path.realpath(sys.argv[1])
+          assert sys.flags.isolated == 1 and os.path.realpath(sys.prefix) == venv
+          site = os.path.join(venv, 'lib', 'python3.12', 'site-packages')
+          assert pip.__version__ == '25.0.1'
+          assert os.path.realpath(pip.__file__).startswith(site + os.sep)
+          cfg = Configuration(isolated=True)
+          cfg.load()
+          assert not dict(cfg.items()), 'unexpected pip configuration'
+          print('pip configuration disabled', pip.__version__)
+          PIPEOF
+          env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" PIP_CONFIG_FILE=/dev/null \
+            "$DELIVERY_ROOT/venv/bin/python" -I -m pip --isolated --disable-pip-version-check \
+            --no-input --no-cache-dir install \
+            --require-hashes --no-index --no-deps --only-binary=:all: \
+            --find-links "$DELIVERY_ROOT/wheel" \
+            --requirement "$DELIVERY_ROOT/work/requirements.lock"
+
+      - name: Verify imported PyYAML origin and native extension
+        env:
+          DELIVERY_ROOT: ${{ runner.temp }}/pyyaml-delivery
+        run: |
+          set -euo pipefail
+          cd "$DELIVERY_ROOT/work"
+          env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" \
+            "$DELIVERY_ROOT/venv/bin/python" -I - "$DELIVERY_ROOT/venv" <<'PYEOF'
+          import importlib.metadata as md, os, sys
+          venv = os.path.realpath(sys.argv[1])
+          assert sys.flags.isolated == 1
+          assert os.path.realpath(sys.prefix) == venv, sys.prefix
+          site = os.path.join(venv, 'lib', 'python3.12', 'site-packages')
+          import yaml
+          assert yaml.__version__ == '6.0.3', yaml.__version__
+          assert md.version('PyYAML') == '6.0.3'
+          yp = os.path.realpath(yaml.__file__)
+          assert yp.startswith(site + os.sep), yp
+          assert yaml.__with_libyaml__ is True
+          import yaml._yaml as ext
+          ep = os.path.realpath(ext.__file__)
+          assert ep.startswith(site + os.sep) and ep.endswith('.so'), ep
+          print('yaml', yaml.__version__, yp)
+          print('native', ep)
+          PYEOF
+
+      - name: Control - cwd and PYTHONPATH shadow must not win
+        env:
+          DELIVERY_ROOT: ${{ runner.temp }}/pyyaml-delivery
+          SHADOW_DIR: ${{ runner.temp }}/yaml-shadow
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$SHADOW_DIR"   # fresh; fails if it exists
+          cat > "$SHADOW_DIR/yaml.py" <<'SHADOWEOF'
+          raise RuntimeError('SHADOW-YAML-IMPORTED')
+          SHADOWEOF
+          cd "$SHADOW_DIR"
+          # Sanity: without -I the shadow must win, so the control below is not vacuous.
+          rc=0
+          out="$(env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" PYTHONPATH="$SHADOW_DIR" \
+            "$DELIVERY_ROOT/venv/bin/python" -c 'import yaml' 2>&1)" || rc=$?
+          if [ "$rc" != 1 ]; then echo "CONTROL-FAIL shadow sanity: expected exit 1, got $rc"; exit 1; fi
+          case "$out" in
+            *SHADOW-YAML-IMPORTED*) echo 'CONTROL-OK shadow is effective without -I' ;;
+            *) echo 'CONTROL-FAIL shadow sanity: marker missing'; exit 1 ;;
+          esac
+          # Real control: isolated interpreter, cwd and PYTHONPATH both point at the shadow.
+          env -i PATH=/usr/bin:/bin HOME="$DELIVERY_ROOT/home" PYTHONPATH="$SHADOW_DIR" \
+            "$DELIVERY_ROOT/venv/bin/python" -I - "$DELIVERY_ROOT/venv" "$SHADOW_DIR" <<'SHPY'
+          import importlib.metadata as md, os, sys
+          venv = os.path.realpath(sys.argv[1])
+          shadow = os.path.realpath(sys.argv[2])
+          assert sys.flags.isolated == 1
+          assert os.path.realpath(sys.prefix) == venv, sys.prefix
+          assert os.path.realpath(os.environ['PYTHONPATH']) == shadow
+          assert os.path.realpath(os.getcwd()) == shadow
+          assert not any(p and os.path.realpath(p) == shadow for p in sys.path), sys.path
+          site = os.path.join(venv, 'lib', 'python3.12', 'site-packages')
+          import yaml
+          assert yaml.__version__ == '6.0.3', yaml.__version__
+          assert md.version('PyYAML') == '6.0.3'
+          yp = os.path.realpath(yaml.__file__)
+          assert yp.startswith(site + os.sep), yp
+          assert yaml.__with_libyaml__ is True
+          print('CONTROL-OK shadow ignored', yp)
+          SHPY
+          echo 'PARSER-DELIVERY-CHECK-COMPLETE'
