@@ -45,6 +45,7 @@ jobs:
       pull-requests: write
       actions: read
       checks: read
+      vulnerability-alerts: read
     outputs:
       merge_sha: ${{ steps.gate.outputs.merge_sha }}
       merged_pr: ${{ steps.gate.outputs.merged_pr }}
@@ -60,7 +61,7 @@ jobs:
           import base64
           import binascii
           import json
-
+          
           MAX_CHARS = 2000000
           MAX_DEPTH = 40
           MAX_DIGITS = 9
@@ -69,17 +70,17 @@ jobs:
           DIGITS = frozenset('0123456789')
           NAME_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789._-')
           REGISTRY = 'https://registry.npmjs.org/'
-
-
+          
+          
           class Bad(Exception):
               pass
-
-
+          
+          
           def _eq(a, b):
               # canonical comparison: keeps 1, 1.0 and True distinct
               return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
-
-
+          
+          
           def _pairs(pairs):
               out = {}
               for k, v in pairs:
@@ -87,20 +88,20 @@ jobs:
                       raise Bad('duplicate JSON key')
                   out[k] = v
               return out
-
-
+          
+          
           def _bad_const(name):
               raise Bad('non-finite JSON number')
-
-
+          
+          
           def _depth_ok(v, n=0):
               if n > MAX_DEPTH:
                   raise Bad('JSON too deep')
               kids = v.values() if type(v) is dict else (v if type(v) is list else ())
               for k in kids:
                   _depth_ok(k, n + 1)
-
-
+          
+          
           def _load(s, what):
               if type(s) is not str:
                   raise Bad(what + ' is not a string')
@@ -114,8 +115,8 @@ jobs:
                   raise Bad(what + ' is not an object')
               _depth_ok(v)
               return v
-
-
+          
+          
           def _semver(s):
               # stable X.Y.Z only: ASCII digits, no leading zero, bounded size
               if type(s) is not str or not s.isascii():
@@ -129,8 +130,8 @@ jobs:
                       raise Bad('unsupported version')
                   out.append(int(p))
               return tuple(out)
-
-
+          
+          
           def _range(s):
               try:
                   if type(s) is not str:
@@ -139,8 +140,8 @@ jobs:
                   return (op, _semver(s[len(op):]))
               except Bad:
                   raise Bad('unsupported dependency range')
-
-
+          
+          
           def _sat(r, v):
               op, b = r
               if v < b:
@@ -154,8 +155,8 @@ jobs:
               if b[1]:
                   return v[:2] == b[:2]
               return v == b
-
-
+          
+          
           def _valid_name(n):
               if type(n) is not str or not n.isascii() or not 0 < len(n) <= 214:
                   return False
@@ -170,8 +171,8 @@ jobs:
                   if not s or s[0] in '._' or s == 'node_modules' or not set(s) <= NAME_CHARS:
                       return False
               return True
-
-
+          
+          
           def _name_of(key):
               parts = key.split('/')
               i = 0
@@ -191,8 +192,8 @@ jobs:
                   if not _valid_name(name):
                       raise Bad('unsupported package name')
               return name
-
-
+          
+          
           def _integrity(s):
               if type(s) is not str or not s.isascii() or not s.startswith('sha512-'):
                   raise Bad('integrity must be sha512')
@@ -203,8 +204,8 @@ jobs:
                   raise Bad('integrity is not base64')
               if len(raw) != 64 or base64.b64encode(raw).decode() != b64:
                   raise Bad('integrity is not a canonical 64-byte digest')
-
-
+          
+          
           def _check_node(name, n):
               if 'link' in n or 'workspaces' in n:
                   raise Bad('link or workspace node')
@@ -216,8 +217,8 @@ jobs:
                   raise Bad('resolved URL does not match package identity')
               _integrity(n.get('integrity'))
               return ver
-
-
+          
+          
           def _upgrade(b, a, bv, av):
               diff = [f for f in set(b) | set(a)
                       if (f in b) != (f in a) or (f in b and not _eq(b[f], a[f]))]
@@ -230,8 +231,8 @@ jobs:
                   raise Bad('not a same-major upgrade')
               if _eq(b['integrity'], a['integrity']):
                   raise Bad('version bump without integrity change')
-
-
+          
+          
           def _packages(lock):
               if type(lock.get('lockfileVersion')) is not int or lock['lockfileVersion'] != 3:
                   raise Bad('lockfileVersion must be exactly 3')
@@ -239,12 +240,12 @@ jobs:
               if type(pk) is not dict or '' not in pk or any(type(v) is not dict for v in pk.values()):
                   raise Bad('malformed packages map')
               return pk
-
-
+          
+          
           def _non_dep(m):
               return {k: v for k, v in m.items() if k not in DEPS}
-
-
+          
+          
           def _deps(m):
               if 'workspaces' in m:
                   raise Bad('workspaces unsupported')
@@ -260,8 +261,8 @@ jobs:
                           raise Bad('unsupported package name')
                       cats[k] = (c, _range(v))
               return cats
-
-
+          
+          
           def _manifests(bm, am):
               bd, ad = _deps(bm), _deps(am)
               if not _eq(_non_dep(bm), _non_dep(am)):
@@ -278,8 +279,8 @@ jobs:
                       if r2[1] < r[1] or r2[1][0] != r[1][0] or r[1][0] == 0:
                           raise Bad('dependency range change is not a same-major upgrade')
               return bd, ad
-
-
+          
+          
           def _root(lock, pk, m, deps):
               root = pk['']
               if 'workspaces' in root or 'link' in root:
@@ -300,8 +301,8 @@ jobs:
                       continue
                   if not _sat(r, _semver(node.get('version'))):
                       raise Bad('locked version outside manifest range')
-
-
+          
+          
           def _policy(p):
               if type(p) is not dict or set(p) != {'max_changed_nodes'}:
                   raise Bad('policy must be exactly {max_changed_nodes: positive int}')
@@ -309,8 +310,8 @@ jobs:
               if type(n) is not int or n < 1:
                   raise Bad('policy must be exactly {max_changed_nodes: positive int}')
               return n
-
-
+          
+          
           def _run(bls, als, bms, ams, policy, changed):
               cap = _policy(policy)
               bl, al = _load(bls, 'before lock'), _load(als, 'after lock')
@@ -351,8 +352,8 @@ jobs:
               return {'STATUS': 'OK',
                       'reason': 'eligible for human review: %d changed node(s); this is not a merge approval' % len(changed),
                       'changed_nodes': list(changed)}
-
-
+          
+          
           def classify_change(before_lock_str, after_lock_str, before_manifest_str, after_manifest_str, policy):
               changed = []
               try:
@@ -366,7 +367,7 @@ jobs:
           OWL_EOF_CLASSIFIER
           cat > "$GATE_DIR/evidence_adapter.py" <<'OWL_EOF_EVIDENCE'
           '''Read-only GitHub REST evidence collector for same-repo Dependabot PRs.
-
+          
           Stdlib only. Transport is injected: get(api_path) -> parsed JSON; it must raise on any HTTP error.
           GET-only. Never fetches or executes PR code. eligibility is always False in this version.
           '''
@@ -374,42 +375,42 @@ jobs:
           PER_PAGE, MAX_PAGES, MAX_CAP = 100, 10, 500
           POLICY_KEYS = {'repo', 'repo_id', 'bot_id', 'base_branch', 'expected_checks', 'allowed_paths', 'max_requests'}
           SAFE = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
-
-
+          
+          
           class Hold(Exception):
               pass
-
-
+          
+          
           def need(cond, msg):
               if not cond:
                   raise Hold(msg)
-
-
+          
+          
           def is_int(x):
               return type(x) is int  # excludes bool
-
-
+          
+          
           def is_str(x):
               return type(x) is str
-
-
+          
+          
           def is_sha(x):
               return is_str(x) and len(x) == 40 and set(x) <= set('0123456789abcdef') and x != '0' * 40
-
-
+          
+          
           def obj(x, what):
               need(type(x) is dict, what + ': expected object')
               return x
-
-
+          
+          
           def bad_path(p):
               if not is_str(p) or not p or p.startswith('/') or chr(92) in p:
                   return True
               if any(ord(c) < 32 or ord(c) == 127 for c in p):
                   return True
               return any(s in ('', '.', '..') or s.lower() == '.github' for s in p.split('/'))
-
-
+          
+          
           def check_policy(pol, n):
               need(type(pol) is dict and set(pol) == POLICY_KEYS, 'policy keys must be exactly ' + ','.join(sorted(POLICY_KEYS)))
               need(is_int(n) and n > 0, 'pr_number must be a positive int')
@@ -427,17 +428,17 @@ jobs:
               need(not any(bad_path(p) for p in ap) and len(set(ap)) == len(ap), 'policy allowed_paths unsafe or duplicated')
               cap = pol['max_requests']
               need(is_int(cap) and 1 <= cap <= MAX_CAP, 'policy max_requests must be a finite int cap')
-
-
+          
+          
           class Api:
               def __init__(self, get, cap):
                   self.get, self.cap, self.n = get, cap, 0
-
+          
               def one(self, path):
                   self.n += 1
                   need(self.n <= self.cap, 'request cap exceeded')
                   return self.get(path)
-
+          
               def pages(self, path, key=None):
                   # ?page=N&per_page=100, at most MAX_PAGES pages; a full final page at the cap is a HOLD.
                   sep = '&' if '?' in path else '?'
@@ -460,8 +461,8 @@ jobs:
                       raise Hold(path + ': page cap reached with a full page')
                   need(total is None or len(out) == total, path + ': total_count != items collected')
                   return out
-
-
+          
+          
           def read_pr(api, pol, n):
               pr = obj(api.one('/repos/%s/pulls/%d' % (pol['repo'], n)), 'pr')
               need(pr.get('number') == n and is_int(pr.get('number')), 'PR number mismatch')
@@ -482,16 +483,16 @@ jobs:
               need(is_int(pr.get('changed_files')), 'PR changed_files missing')
               need(is_int(pr.get('commits')) and 1 <= pr['commits'] <= 250, 'PR commit count missing or over cap')
               return pr
-
-
+          
+          
           def read_ref(api, pol):
               r = obj(api.one('/repos/%s/git/ref/heads/%s' % (pol['repo'], pol['base_branch'])), 'ref')
               o = obj(r.get('object'), 'ref object')
               need(r.get('ref') == 'refs/heads/' + pol['base_branch'] and o.get('type') == 'commit' and is_sha(o.get('sha')),
                    'bad base branch ref')
               return o['sha']
-
-
+          
+          
           def read_checks(api, pol, head):
               base = '/repos/%s/commits/%s' % (pol['repo'], head)
               runs = api.pages(base + '/check-runs?filter=latest', 'check_runs')
@@ -523,8 +524,8 @@ jobs:
                   ctxs.add(context)
               return ([{'id': r['id'], 'name': r['name'], 'app_id': r['app']['id']} for r in runs],
                       [{'id': s['id'], 'context': s['context']} for s in sts])
-
-
+          
+          
           def read_commits(api, pol, n, head, expected_count):
               cs = api.pages('/repos/%s/pulls/%d/commits' % (pol['repo'], n))
               need(cs, 'no PR commits')
@@ -543,8 +544,8 @@ jobs:
               need(len(seen) == expected_count, 'PR commit count mismatch')
               need(seen[-1] == head, 'PR head sha is not the final PR commit')
               return seen
-
-
+          
+          
           def read_files(api, pol, n, pr):
               fs = api.pages('/repos/%s/pulls/%d/files' % (pol['repo'], n))
               need(fs, 'no changed files')
@@ -560,12 +561,12 @@ jobs:
                   seen.add(p)
                   out.append({'filename': p, 'status': 'modified', 'additions': f['additions'], 'deletions': f['deletions']})
               return out
-
-
+          
+          
           def hold(reason):
               return {'STATUS': 'HOLD', 'eligibility': False, 'reason': reason}
-
-
+          
+          
           def collect(get, policy, pr_number):
               try:
                   check_policy(policy, pr_number)
@@ -596,10 +597,11 @@ jobs:
           OWL_EOF_EVIDENCE
           cat > "$GATE_DIR/integration.py" <<'OWL_EOF_INTEGRATION'
           '''Dependabot merge-on-green gate (stdlib only, runs in the privileged job).
-
+          
           Finds open same-repo Dependabot PRs, re-proves fresh provider evidence, and squash-merges at most one per run.
           Untrusted: PR content, lockfiles, job logs, check and file names, every API response.
-          Trusted: classifier.py, evidence_adapter.py and this file, embedded by the coordinator in reusable.yml.
+          Trusted: classifier.py, evidence_adapter.py, security_provenance.py and this file.
+          SOURCE CANDIDATE: coordinator must separately review and assemble these files.
           Never checks out or executes PR code. Only api.github.com gets the token; the job-log redirect is fetched without it.
           '''
           import base64
@@ -612,16 +614,25 @@ jobs:
           import urllib.error
           import urllib.parse
           import urllib.request
-
+          
           HERE = os.path.dirname(os.path.abspath(__file__))
           if HERE not in sys.path:  # python -I drops the script dir from sys.path
               sys.path.insert(0, HERE)
           import classifier  # noqa: E402
           import evidence_adapter as ev  # noqa: E402
-
+          import security_provenance as sp  # noqa: E402
+          
           UA = 'silver-owl-dependabot-gate'
           TIMEOUT, MAX_BODY, MAX_LOG, MAX_TOTAL, MAX_PRS, MAX_FILE = 20, 8000000, 4000000, 600, 10, 1500000
           LABEL = 'needs-rob'
+          # Fixed read-only operation. No caller-supplied GraphQL text is accepted.
+          SECURITY_QUERY = '''query($owner:String!,$name:String!,$after:String){
+          repository(owner:$owner,name:$name){nameWithOwner databaseId
+          vulnerabilityAlerts(first:100,after:$after,states:[OPEN]){totalCount
+          pageInfo{hasNextPage endCursor}
+          nodes{number state vulnerableManifestPath securityVulnerability{package{name ecosystem}}
+          dependabotUpdate{pullRequest{number headRefOid baseRefOid state
+          repository{nameWithOwner databaseId}}}}}}}'''
           PATH_OK = re.compile(r'^/[A-Za-z0-9/._?&=:@-]{1,400}$')
           # GitHub compare uses a literal three-dot separator; allow this exact immutable-SHA
           # route without permitting traversal or arbitrary double-dot path components.
@@ -637,27 +648,27 @@ jobs:
           OK_UPDATES = ('version-update:semver-patch', 'version-update:semver-minor')
           MAJOR = 'version-update:semver-major'
           POLICY_PREFIXES = ('unsafe path', 'path not in allowlist', 'only modified files', 'duplicate path')
-
-
+          
+          
           class Policy(ev.Hold):
               '''Substantive hold that needs Rob (gets the needs-rob label). Every other Hold means wait.'''
-
-
+          
+          
           class HttpStatus(RuntimeError):
               def __init__(self, code, what):
                   RuntimeError.__init__(self, 'HTTP %d on %s' % (code, what))
                   self.code = code
-
-
+          
+          
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, *args, **kwargs):
                   return None  # never follow: Authorization must not travel to another host
-
-
+          
+          
           def _opener():
               return urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-
-
+          
+          
           def _read(opener, req, cap, want_location=False):
               '''Returns bytes, or the Location string for a 302 when want_location. Body is capped.'''
               try:
@@ -671,15 +682,15 @@ jobs:
                   raise HttpStatus(code, req.get_method() + ' ' + urllib.parse.urlsplit(req.full_url).path)
               ev.need(len(raw) <= cap, 'response too large')
               return raw
-
-
+          
+          
           class GitHub:
               '''Authenticated REST client. Host is fixed; paths are validated; mutations are whitelisted; requests are counted.'''
-
+          
               def __init__(self, token, cap=MAX_TOTAL):
                   self.token, self.cap, self.n, self.opener = token, cap, 0, _opener()
-
-              def _send(self, method, path, body, want_location):
+          
+              def _send(self, method, path, body, want_location, hook=None):
                   data = None if body is None else json.dumps(body).encode()
                   req = urllib.request.Request('https://api.github.com' + path, data=data, method=method)
                   req.add_header('Authorization', 'Bearer ' + self.token)
@@ -692,8 +703,8 @@ jobs:
                   if want_location:
                       ev.need(type(raw) is str, 'log endpoint did not redirect')
                       return raw
-                  return json.loads(raw.decode('utf-8'))
-
+                  return json.loads(raw.decode('utf-8'), object_pairs_hook=hook)
+          
               def call(self, method, path, body=None, want_location=False):
                   ev.need(type(path) is str and PATH_OK.fullmatch(path) and '//' not in path
                           and ('..' not in path or COMPARE_PATH.fullmatch(path)),
@@ -702,11 +713,24 @@ jobs:
                   self.n += 1
                   ev.need(self.n <= self.cap, 'run request cap exceeded')
                   return self._send(method, path, body, want_location)
-
+          
               def get(self, path):
                   return self.call('GET', path)
-
-
+          
+              def graphql(self, repo, after):
+                  """Only the fixed alert-association query; existing REST mutation rules stay closed."""
+                  ev.need(type(repo) is str and len(repo) <= 200 and sp.REPO.fullmatch(repo),
+                          'invalid security query repository')
+                  ev.need(after is None or (type(after) is str and 0 < len(after) <= 4096
+                          and not any(ord(c) <= 32 or ord(c) == 127 for c in after)),
+                          'invalid security query cursor')
+                  owner, name = repo.split('/')
+                  self.n += 1
+                  ev.need(self.n <= self.cap, 'run request cap exceeded')
+                  body = {'query': SECURITY_QUERY, 'variables': {'owner': owner, 'name': name, 'after': after}}
+                  return self._send('POST', '/graphql', body, False, hook=_pairs)
+          
+          
           def fetch_log(location):
               '''Unauthenticated fetch of the job-log redirect target: HTTPS, GitHub-owned hosts only, size capped.'''
               # urlsplit strips raw control characters; reject them before host validation.
@@ -718,38 +742,38 @@ jobs:
                       and u.hostname and LOG_HOST.fullmatch(u.hostname.lower()), 'log redirect target is not an allowed HTTPS host')
               raw = _read(_opener(), urllib.request.Request(location, headers={'User-Agent': UA}), MAX_LOG)
               return raw.decode('utf-8', 'replace')
-
-
+          
+          
           def _pairs(pairs):
               out = {}
               for k, v in pairs:
                   ev.need(k not in out, 'duplicate JSON key in envelope')
                   out[k] = v
               return out
-
-
+          
+          
           def snapshot(api, pol, n):
               s = ev.collect(api.get, pol, n)
               if s.get('STATUS') != 'SNAPSHOT_READY':
                   r = str(s.get('reason'))
                   raise (Policy if r.startswith(POLICY_PREFIXES) else ev.Hold)(r)
               return s
-
-
+          
+          
           def prove_ancestry(api, repo, base, head):
               '''Head descends from the CURRENT base tip (PR.base.sha alone proves nothing about ancestry).'''
               c = ev.obj(api.get('/repos/%s/compare/%s...%s?per_page=1' % (repo, base, head)), 'compare')
               mb = ev.obj(c.get('merge_base_commit'), 'merge_base_commit')
               ev.need(c.get('status') == 'ahead' and ev.is_int(c.get('behind_by')) and c['behind_by'] == 0
                       and mb.get('sha') == base, 'head does not descend from the current base tip (behind or diverged)')
-
-
+          
+          
           def _contents(api, repo, path, ref):
               d = ev.obj(api.get('/repos/%s/contents/%s?ref=%s' % (repo, path, ref)), 'contents')
               ev.need(d.get('type') == 'file' and d.get('path') == path and ev.is_str(d.get('sha')), 'contents entry malformed: ' + path)
               return d
-
-
+          
+          
           def read_text(api, repo, path, ref):
               d = _contents(api, repo, path, ref)
               if d.get('encoding') != 'base64' or not ev.is_str(d.get('content')) or not ev.is_int(d.get('size')) or d['size'] > MAX_FILE:
@@ -761,8 +785,8 @@ jobs:
                   raise ev.Hold('contents decode failed: ' + path)
               ev.need(len(raw) == d['size'], 'contents size mismatch: ' + path)
               return text
-
-
+          
+          
           def newest_ci_run(api, pol, head, ci_path):
               runs = ev.Api(api.get, 20).pages(
                   '/repos/%s/actions/runs?head_sha=%s&event=pull_request&exclude_pull_requests=true' % (pol['repo'], head),
@@ -782,8 +806,8 @@ jobs:
                       'CI run head repository mismatch')
               ev.need(r.get('status') == 'completed' and r.get('conclusion') == 'success', 'newest CI run not completed/success')
               return r
-
-
+          
+          
           def metadata_job_id(api, repo, run, head, name):
               jobs = ev.Api(api.get, 20).pages('/repos/%s/actions/runs/%d/attempts/%d/jobs' % (repo, run['id'], run['run_attempt']), 'jobs')
               m = [j for j in jobs if j.get('name') == name]
@@ -793,9 +817,9 @@ jobs:
                       and j.get('head_sha') == head, 'metadata job does not belong to the CI run attempt')
               ev.need(j.get('status') == 'completed' and j.get('conclusion') == 'success', 'metadata job not completed/success')
               return j['id']
-
-
-          def parse_envelope(log, head):
+          
+          
+          def parse_envelope(log, head, *, want_names=False):
               '''Exactly one anchored envelope line; every member must be patch or minor. Duplicates or forgeries HOLD.'''
               found = []
               for line in log.splitlines():
@@ -823,9 +847,60 @@ jobs:
               if MAJOR in types:
                   raise Policy('major version update')
               ev.need(all(t in OK_UPDATES for t in types), 'unsupported or unknown update type')
-              return len(deps)
-
-
+              if want_names:
+                  names = [d['dependencyName'] for d in deps]
+                  ev.need(all(len(name) <= 214 and sp.NAME.fullmatch(name) for name in names)
+                          and len(set(names)) == len(names), 'invalid or duplicate authenticated dependency names')
+                  return sorted(names)
+              return len(deps)  # preserve the existing generic parser API for emitter checks
+          
+          
+          def changed_names(result):
+              """Use the accepted classifier's strict path parser, never substring extraction."""
+              nodes = result.get('changed_nodes')
+              ev.need(type(nodes) is list and nodes and all(type(n) is str for n in nodes)
+                      and len(set(nodes)) == len(nodes), 'classifier changed_nodes malformed')
+              try:
+                  names = {classifier._name_of(node) for node in nodes}
+              except classifier.Bad:
+                  raise ev.Hold('classifier changed_nodes contains unsupported path')
+              ev.need(all(type(name) is str and len(name) <= 214 and sp.NAME.fullmatch(name) for name in names),
+                      'classifier changed package name unsupported')
+              return names
+          
+          
+          def fetch_associations(api, pol, n, head, base, names):
+              pages, after, cursors = [], None, set()
+              for _ in range(sp.MAX_PAGES):
+                  response = api.graphql(pol['repo'], after)
+                  pages.append({'after': after, 'response': response})
+                  # Check the whole bounded response before choosing a pagination cursor.
+                  # Never strip errors or skip null/unrelated alerts to manufacture coverage.
+                  try:
+                      sp.bounded(response)
+                      data = sp.obj(response, ('data',))['data']
+                      repo = sp.obj(data, ('repository',))['repository']
+                      connection = sp.obj(repo, ('nameWithOwner', 'databaseId', 'vulnerabilityAlerts'))['vulnerabilityAlerts']
+                      info = sp.obj(connection, ('totalCount', 'pageInfo', 'nodes'))['pageInfo']
+                      info = sp.obj(info, ('hasNextPage', 'endCursor'))
+                      more, cursor = info['hasNextPage'], info['endCursor']
+                      ev.need(type(more) is bool, 'security pagination continuation unknown')
+                      if not more:
+                          break
+                      ev.need(type(cursor) is str and cursor and cursor not in cursors, 'security pagination cursor loop or missing')
+                      cursors.add(cursor)
+                      after = cursor
+                  except sp.Hold:
+                      raise ev.Hold('security association response malformed or unbounded')
+              policy = {'repo': pol['repo'], 'repo_id': pol['repo_id'], 'pr_number': n,
+                        'head_sha': head, 'base_sha': base, 'ecosystem': 'NPM',
+                        'manifest_paths': ['package-lock.json'], 'expected_names': names}
+              value = sp.validate_associations(pages, policy)
+              ev.need(value.get('STATUS') == 'ASSOCIATION_VALIDATED' and value.get('merge_eligible') is False,
+                      'security association: ' + value.get('reason', 'invalid validator result'))
+              return value
+          
+          
           def evaluate(api, pol, cfg, n, fetch):
               '''Raises Policy (needs Rob) or Hold (wait). Returns the head sha only when every proof holds and was re-read.'''
               repo, ci = pol['repo'], cfg['ci_path']
@@ -844,7 +919,9 @@ jobs:
               run = newest_ci_run(api, pol, head, ci)
               job = metadata_job_id(api, repo, run, head, cfg['metadata_job'])
               loc = api.call('GET', '/repos/%s/actions/jobs/%d/logs' % (repo, job), want_location=True)
-              parse_envelope(fetch(loc), head)
+              names = parse_envelope(fetch(loc), head, want_names=True)
+              ev.need(changed_names(v) == set(names), 'classifier/envelope changed package names differ')
+              associations = fetch_associations(api, pol, n, head, base, names)
               # fresh re-read immediately before the merge call
               s2 = snapshot(api, pol, n)
               ev.need(s2.get('base_sha_matches_ref') is True, 'evidence changed: PR base differs from current base ref in final snapshot')
@@ -853,10 +930,12 @@ jobs:
               ev.need(key(s1) == key(s2), 'evidence changed during evaluation')
               run2 = newest_ci_run(api, pol, head, ci)
               ev.need((run2['id'], run2['run_attempt']) == (run['id'], run['run_attempt']), 'CI run or attempt changed')
+              associations2 = fetch_associations(api, pol, n, head, base, names)
+              ev.need(associations == associations2, 'security association changed during evaluation')
               ev.need(ev.read_ref(ev.Api(api.get, 2), pol) == base, 'base branch moved before merge')
               return head
-
-
+          
+          
           def try_merge(api, repo, n, head):
               '''Merge SHA, ev.Hold when GitHub definitely refused, RuntimeError when the outcome is unknown.
               The sha parameter guards the head only; base freshness is bounded by the re-reads above, not a server CAS.'''
@@ -873,8 +952,8 @@ jobs:
               if type(r) is dict and r.get('merged') is True and ev.is_sha(r.get('sha')):
                   return r['sha']
               raise RuntimeError('merge outcome unknown: unexpected response')
-
-
+          
+          
           def flag_for_rob(api, repo, n):
               try:
                   issue = ev.obj(api.get('/repos/%s/issues/%d' % (repo, n)), 'issue')
@@ -885,8 +964,8 @@ jobs:
                   return 'labelled'
               except Exception as e:
                   return 'label failed: ' + type(e).__name__
-
-
+          
+          
           def candidates(api, pol, only):
               if only:
                   return [only]
@@ -895,8 +974,8 @@ jobs:
               nums = {p['number'] for p in ps if type(p.get('number')) is int and type(p.get('user')) is dict
                       and p['user'].get('id') == ev.BOT_ID}
               return sorted(nums)[:MAX_PRS]
-
-
+          
+          
           def run_gate(api, pol, cfg, fetch=None):
               '''Returns (results, merged). At most one merge; no retries. RuntimeError means merge outcome unknown.'''
               fetch = fetch or fetch_log
@@ -923,8 +1002,8 @@ jobs:
                   results.append((n, 'MERGED', sha))
                   break
               return results, merged
-
-
+          
+          
           def load_config(env):
               try:
                   pol = {'repo': env['GATE_REPO'], 'repo_id': int(env['GATE_REPO_ID']), 'bot_id': ev.BOT_ID,
@@ -940,8 +1019,8 @@ jobs:
               ev.need(CI_PATH.fullmatch(cfg['ci_path']) and JOB_NAME.fullmatch(cfg['metadata_job'])
                       and 1 <= cfg['max_nodes'] <= 20 and cfg['only_pr'] >= 0, 'gate config out of range')
               return pol, cfg
-
-
+          
+          
           def clean(s, token=''):
               '''Log-safe text: masks the token, drops control characters and workflow-command prefixes.'''
               s = str(s)
@@ -949,8 +1028,8 @@ jobs:
                   s = s.replace(token, '***')
               s = re.sub(r'[^A-Za-z0-9 _.,;:/@#()=+-]', '?', s)[:240]
               return s.replace('::', ': ')
-
-
+          
+          
           def emit(env, results, merged, token=''):
               lines = ['gate pr=%s state=%s: %s' % (n, st, clean(why, token)) for n, st, why in results]
               for line in lines:
@@ -962,8 +1041,8 @@ jobs:
               if env.get('GITHUB_STEP_SUMMARY'):
                   with open(env['GITHUB_STEP_SUMMARY'], 'a') as f:
                       f.write(chr(10).join(['- ' + x for x in lines] or ['- no candidates']) + chr(10))
-
-
+          
+          
           def main(env=None):
               env = os.environ if env is None else env
               token = env.get('GITHUB_TOKEN', '')
@@ -980,11 +1059,174 @@ jobs:
                   return 1
               emit(env, results, merged, token)
               return 0
-
-
+          
+          
           if __name__ == '__main__':
               sys.exit(main())
           OWL_EOF_INTEGRATION
+          cat > "$GATE_DIR/security_provenance.py" <<'OWL_EOF_SECURITY'
+          """Pure source prototype: validate authenticated GraphQL alert associations.
+          
+          No transport, credential handling, clock/freshness proof or merge authorization.
+          The caller must authenticate responses and bind policy to its fresh PR snapshot.
+          """
+          import re
+          
+          MAX_PAGES, MAX_ALERTS, MAX_PAGE = 10, 1000, 100
+          MAX_TREE_NODES, MAX_TEXT_BYTES = 20000, 1000000
+          SHA = re.compile(r'[0-9a-f]{40}', re.ASCII)
+          REPO = re.compile(r'[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*/[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*', re.ASCII)
+          NAME = re.compile(r'(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*', re.ASCII)
+          POLICY_KEYS = {'repo', 'repo_id', 'pr_number', 'head_sha', 'base_sha',
+                         'ecosystem', 'manifest_paths', 'expected_names'}
+          
+          
+          class Hold(Exception):
+              pass
+          
+          
+          def need(ok, why):
+              if not ok:
+                  raise Hold(why)
+          
+          
+          def obj(value, keys):
+              need(type(value) is dict and set(value) == set(keys), 'unexpected or missing object fields')
+              return value
+          
+          
+          def positive(value):
+              return type(value) is int and value > 0
+          
+          
+          def sha(value):
+              return type(value) is str and SHA.fullmatch(value) and value != '0' * 40
+          
+          
+          def path(value):
+              return (type(value) is str and len(value) <= 512
+                      and all(re.fullmatch(r'[A-Za-z0-9_.@-]+', p, re.ASCII)
+                              and p not in ('.', '..') and p.lower() != '.github'
+                              for p in value.split('/')))
+          
+          
+          def bounded(value):
+              """Bound already-parsed inputs before inspecting their schema."""
+              counts = [0, 0]
+          
+              def visit(item, depth):
+                  counts[0] += 1
+                  need(depth <= 16 and counts[0] <= MAX_TREE_NODES, 'input tree cap exceeded')
+                  need(type(item) in (dict, list, str, int, bool, type(None)), 'unsupported input type')
+                  if type(item) is str:
+                      need(len(item) <= 4096, 'input string cap exceeded')
+                      counts[1] += len(item.encode('utf-8'))
+                      need(counts[1] <= MAX_TEXT_BYTES, 'input byte cap exceeded')
+                  elif type(item) is dict:
+                      for key, child in item.items():
+                          need(type(key) is str, 'object key must be string')
+                          visit(key, depth + 1)
+                          visit(child, depth + 1)
+                  elif type(item) is list:
+                      for child in item:
+                          visit(child, depth + 1)
+              visit(value, 0)
+          
+          
+          def _validate(pages, policy):
+              bounded([pages, policy])
+              obj(policy, POLICY_KEYS)
+              need(type(policy['repo']) is str and REPO.fullmatch(policy['repo'])
+                   and positive(policy['repo_id']) and positive(policy['pr_number']), 'invalid expected identity')
+              need(sha(policy['head_sha']) and sha(policy['base_sha']), 'invalid expected SHA')
+              need(policy['ecosystem'] == 'NPM', 'unsupported expected ecosystem')
+              manifests, names = policy['manifest_paths'], policy['expected_names']
+              need(type(manifests) is list and 0 < len(manifests) <= 100
+                   and all(path(p) for p in manifests) and len(set(manifests)) == len(manifests),
+                   'invalid expected manifest paths')
+              need(type(names) is list and 0 < len(names) <= 100
+                   and all(type(n) is str and len(n) <= 214 and NAME.fullmatch(n) for n in names)
+                   and len(set(names)) == len(names), 'invalid expected update names')
+              need(type(pages) is list and 0 < len(pages) <= MAX_PAGES, 'missing or excessive pages')
+              after, total = None, None
+              cursors, seen, found, matched = set(), set(), set(), []
+              pr_refs = {}
+              for index, page in enumerate(pages):
+                  obj(page, ('after', 'response'))
+                  need(page['after'] == after and (after is None or type(page['after']) is str),
+                       'request cursor continuity mismatch')
+                  response = obj(page['response'], ('data',))  # errors/partial data never accepted
+                  repo = obj(obj(response['data'], ('repository',))['repository'],
+                             ('nameWithOwner', 'databaseId', 'vulnerabilityAlerts'))
+                  need(repo['nameWithOwner'] == policy['repo'] and type(repo['databaseId']) is int
+                       and repo['databaseId'] == policy['repo_id'], 'repository identity mismatch')
+                  connection = obj(repo['vulnerabilityAlerts'], ('totalCount', 'pageInfo', 'nodes'))
+                  count = connection['totalCount']
+                  need(type(count) is int and 0 <= count <= MAX_ALERTS
+                       and (total is None or count == total), 'alert total missing, changed or over cap')
+                  total = count
+                  nodes = connection['nodes']
+                  need(type(nodes) is list and 0 < len(nodes) <= MAX_PAGE, 'empty or excessive alert page')
+                  info = obj(connection['pageInfo'], ('hasNextPage', 'endCursor'))
+                  cursor, more = info['endCursor'], info['hasNextPage']
+                  need(type(more) is bool and type(cursor) is str and cursor
+                       and not any(ord(c) <= 32 or ord(c) == 127 for c in cursor),
+                       'unknown pagination state')
+                  need(cursor not in cursors, 'cursor loop')
+                  cursors.add(cursor)
+                  need(more == (index < len(pages) - 1), 'truncated or extra pages')
+                  after = cursor
+                  for node in nodes:
+                      obj(node, ('number', 'state', 'vulnerableManifestPath', 'securityVulnerability', 'dependabotUpdate'))
+                      number = node['number']
+                      need(positive(number) and number not in seen, 'invalid or duplicate alert number')
+                      seen.add(number)
+                      need(node['state'] == 'OPEN', 'alert is not OPEN')
+                      package = obj(obj(node['securityVulnerability'], ('package',))['package'], ('name', 'ecosystem'))
+                      name = package['name']
+                      need(type(name) is str and len(name) <= 214 and NAME.fullmatch(name)
+                           and package['ecosystem'] == policy['ecosystem'], 'package identity mismatch')
+                      need(path(node['vulnerableManifestPath']), 'invalid alert manifest path')
+                      pr = obj(obj(node['dependabotUpdate'], ('pullRequest',))['pullRequest'],
+                               ('number', 'headRefOid', 'baseRefOid', 'state', 'repository'))
+                      prrepo = obj(pr['repository'], ('nameWithOwner', 'databaseId'))
+                      need(prrepo['nameWithOwner'] == policy['repo'] and type(prrepo['databaseId']) is int
+                           and prrepo['databaseId'] == policy['repo_id'], 'associated PR repository mismatch')
+                      need(positive(pr['number']) and sha(pr['headRefOid']) and sha(pr['baseRefOid'])
+                           and pr['state'] == 'OPEN', 'associated PR malformed or not OPEN')
+                      refs = (pr['headRefOid'], pr['baseRefOid'])
+                      need(pr['number'] not in pr_refs or pr_refs[pr['number']] == refs,
+                           'associated PR identity changed across alerts')
+                      pr_refs[pr['number']] = refs
+                      if pr['number'] == policy['pr_number']:
+                          need(pr['headRefOid'] == policy['head_sha'] and pr['baseRefOid'] == policy['base_sha'],
+                               'associated PR head/base mismatch')
+                          need(node['vulnerableManifestPath'] in manifests, 'associated manifest outside expected scope')
+                          need(name in names, 'associated package outside expected update names')
+                          found.add(name)
+                          matched.append(number)
+              need(len(seen) == total, 'alert count differs from complete pagination')
+              need(found == set(names), 'expected update-name association coverage incomplete')
+              return {'STATUS': 'ASSOCIATION_VALIDATED', 'repo': policy['repo'], 'pr_number': policy['pr_number'],
+                      'head_sha': policy['head_sha'], 'base_sha': policy['base_sha'],
+                      'update_names': sorted(found), 'alert_numbers': sorted(matched), 'merge_eligible': False}
+          
+          
+          def validate_associations(pages, policy):
+              """pages = [{after: requested cursor (None initially), response: GraphQL JSON}].
+          
+              Strict query projection only; unknown fields HOLD. Multiple distinct alerts
+              for one package are valid; repeated alert numbers are not. All queried alerts
+              and associated PRs must be OPEN, even unrelated ones (conservative).
+              """
+              try:
+                  return _validate(pages, policy)
+              except Hold as error:
+                  reason = str(error)
+              except (TypeError, ValueError, RecursionError, OverflowError):
+                  reason = 'invalid bounded response input'
+              return {'STATUS': 'HOLD', 'reason': reason, 'merge_eligible': False}
+          OWL_EOF_SECURITY
           sha256sum "$GATE_DIR"/*.py
       - name: Evaluate and merge at most one PR
         id: gate
