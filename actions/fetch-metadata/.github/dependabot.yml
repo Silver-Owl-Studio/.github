@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "16:00"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "16:00"
+    groups:
+      dependencies:
+        patterns:
+          - "*actions*"
+          - "*pluralize*"
+      dev-dependencies:
+        patterns:
+          - "*eslint*"
+          - "*types*"
+          - "*vercel"
+          - "*dotenv*"
+          - "*jest*"
+          - "*nock*"
+          - "*node*"
+          - "*yaml*"
+          - "*yargs*"

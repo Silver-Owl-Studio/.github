@@ -1,0 +1,11 @@
+#!/bin/bash
+
+usage() { echo "Usage: $0 [ major | minor | patch ]" 1>&2; exit 1; }
+
+version_type=$1
+if [ "$version_type" == "major" ] || [ "$version_type" == "minor" ] || [ "$version_type" == "patch" ]; then
+  new_version=$(npm version "$version_type" --no-git-tag-version) || exit
+  echo "$new_version"
+else
+  usage
+fi
