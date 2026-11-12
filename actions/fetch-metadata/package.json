@@ -23,7 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.11.1",
-    "@actions/github": "^5.1.1",
+    "@actions/github": "^9.1.1",
     "@octokit/request-error": "^5.1.1",
     "pluralize": "^8.0.0"
   },
